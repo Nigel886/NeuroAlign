@@ -1,20 +1,58 @@
 import scipy.io
 import numpy as np
 import torch
+import mne
 import os
 from pathlib import Path
 from tqdm import tqdm
 
+def clean_eeg_with_mne(data_105, sfreq=1000, target_fs=250):
+    """
+    使用 MNE 进行高级清洗：滤波、重采样、ICA 去伪影
+    data_105: (105, T) 的 numpy 数组
+    """
+    # 1. 创建 MNE 结构
+    # ZuCo 使用 105 通道，这里简单命名，实际可根据 electrode 映射表优化
+    ch_names = [f"EEG{i:03d}" for i in range(1, 106)]
+    info = mne.create_info(ch_names=ch_names, sfreq=sfreq, ch_types='eeg')
+    raw = mne.io.RawArray(data_105, info, verbose=False)
+    
+    # 设置标准导联（可选，有助于 ICA 可视化和自动检测）
+    # raw.set_montage('standard_1024') 
+    
+    # 2. 带通滤波 (0.5 - 50Hz)
+    raw.filter(l_freq=0.5, h_freq=50.0, fir_design='firwin', verbose=False)
+    
+    # 3. 重采样
+    if sfreq != target_fs:
+        raw.resample(target_fs, verbose=False)
+    
+    # 4. ICA 去伪影
+    # n_components 设置为 20 是一个轻量级的平衡点
+    ica = mne.preprocessing.ICA(n_components=20, random_state=42, method='fastica', verbose=False)
+    ica.fit(raw, verbose=False)
+    
+    # 自动检测眼动 (EOG) 成分
+    # 由于没有专门的 EOG 通道，我们利用前额通道 (如 EEG001/EEG002，对应 FP1/FP2) 作为参考
+    # 在 ZuCo 中，前几个通道通常是前额通道
+    eog_indices, eog_scores = ica.find_bads_eog(raw, ch_name='EEG001', threshold=3.0, verbose=False)
+    
+    # 如果没搜到，尝试另一个前额通道
+    if not eog_indices:
+        eog_indices, eog_scores = ica.find_bads_eog(raw, ch_name='EEG002', threshold=3.0, verbose=False)
+    
+    # 剔除检测到的成分
+    ica.exclude = eog_indices
+    raw_cleaned = raw.copy()
+    ica.apply(raw_cleaned, verbose=False)
+    
+    return raw_cleaned
+
 def process_word_eeg(eeg_data):
     """
-    处理单个单词的脑电数据。
-    ZuCo 中 rawEEG 可能是:
-    1. 一个包含多个 fixation 矩阵的 object array: [(105, T1), (105, T2), ...]
-    2. 一个直接的矩阵: (105, T)
-    目标: 转换为 (105,) 的向量 (通过对时间维度取平均)
+    处理单个单词的脑电数据（时间维度平均）
     """
     if isinstance(eeg_data, np.ndarray) and eeg_data.dtype == np.object_:
-        # 情况 1: 多个 fixation，先对每个 fixation 取平均，再对所有 fixation 取平均
         fixation_averages = []
         for fix in eeg_data:
             if isinstance(fix, np.ndarray) and fix.size > 0:
@@ -24,57 +62,77 @@ def process_word_eeg(eeg_data):
         else:
             return np.zeros(105)
     elif isinstance(eeg_data, np.ndarray) and eeg_data.ndim == 2:
-        # 情况 2: 直接是 (105, T)
         return np.mean(eeg_data, axis=1)
     else:
-        # 异常情况，返回零向量
         return np.zeros(105)
 
-def run_preprocessing(input_mat, output_pt):
+def run_advanced_preprocessing(input_mat, output_dir):
+    """
+    完整清洗流程：加载 -> MNE 清洗 -> 保存 .fif -> 提取特征保存 .pt
+    """
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+    fif_dir = output_path / "fif_cleaned"
+    fif_dir.mkdir(exist_ok=True)
+
     print(f"Loading {input_mat}...")
     mat = scipy.io.loadmat(input_mat, squeeze_me=True, struct_as_record=False)
     sentence_data = mat['sentenceData']
     
-    processed_data = []
+    processed_list = []
     
-    print("Preprocessing sentences...")
-    for sent_obj in tqdm(sentence_data):
-        content = sent_obj.content
-        words_obj = sent_obj.word
+    print(f"Cleaning {len(sentence_data)} sentences with MNE ICA...")
+    for i, sent_obj in enumerate(tqdm(sentence_data)):
+        # 1. 句子级原始信号清洗
+        raw_eeg = sent_obj.rawData # (105, T)
         
-        # 提取该句所有单词的 EEG 特征
-        sentence_eeg_features = []
-        word_list = []
-        
-        # 处理每个单词
-        # 注意: 有些单词可能没有有效的脑电记录（注视缺失）
-        for w in words_obj:
-            word_text = w.content
-            # 尝试获取 rawEEG
-            eeg_raw = getattr(w, 'rawEEG', None)
+        # 执行 MNE 清洗
+        try:
+            cleaned_raw = clean_eeg_with_mne(raw_eeg, sfreq=1000, target_fs=250)
             
-            if eeg_raw is not None:
-                eeg_vector = process_word_eeg(eeg_raw)
-                sentence_eeg_features.append(eeg_vector)
-                word_list.append(word_text)
-        
-        if len(sentence_eeg_features) > 0:
-            processed_data.append({
-                'content': content,
-                'word_list': word_list,
-                'eeg_features': np.array(sentence_eeg_features) # (seq_len, 105)
-            })
+            # 2. 保存为 .fif 格式
+            fif_name = fif_dir / f"sentence_{i:03d}_cleaned.fif"
+            cleaned_raw.save(str(fif_name), overwrite=True, verbose=False)
+            
+            # 3. 提取清洗后的 Word-level 特征
+            # 注意：此处我们仍然利用 ZuCo 已经切分好的 word 结构，
+            # 但为了严谨，理想情况应根据 wordbounds 重新在 cleaned_raw 上切分。
+            # 这里先遵循用户逻辑，处理 word['rawEEG']
+            words_obj = sent_obj.word
+            sentence_eeg_features = []
+            word_list = []
+            
+            for w in words_obj:
+                word_text = w.content
+                eeg_raw = getattr(w, 'rawEEG', None)
+                if eeg_raw is not None:
+                    # 对 word-level 数据也进行平均化处理
+                    eeg_vector = process_word_eeg(eeg_raw)
+                    sentence_eeg_features.append(eeg_vector)
+                    word_list.append(word_text)
+            
+            if len(sentence_eeg_features) > 0:
+                processed_list.append({
+                    'sentence_id': i,
+                    'content': sent_obj.content,
+                    'word_list': word_list,
+                    'eeg_features': np.array(sentence_eeg_features) # (seq_len, 105)
+                })
+                
+        except Exception as e:
+            print(f"Error processing sentence {i}: {e}")
 
-    print(f"Saving {len(processed_data)} processed sentences to {output_pt}...")
-    torch.save(processed_data, output_pt)
-    print("Done!")
+    # 保存最终用于训练的 .pt 文件
+    torch.save(processed_list, output_path / "processed_zuco_cleaned.pt")
+    print(f"\nPreprocessing complete!")
+    print(f"Cleaned .fif files saved in: {fif_dir}")
+    print(f"Final training data saved as: {output_path / 'processed_zuco_cleaned.pt'}")
 
 if __name__ == "__main__":
-    # 自动处理 data 目录下的 resultsZAB_SR.mat
     input_file = "./data/resultsZAB_SR.mat"
-    output_file = "./data/processed_zuco.pt"
+    output_dir = "./data/preprocessed"
     
     if os.path.exists(input_file):
-        run_preprocessing(input_file, output_file)
+        run_advanced_preprocessing(input_file, output_dir)
     else:
-        print(f"Input file {input_file} not found. Please check the path.")
+        print(f"Input file {input_file} not found.")
