@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.cuda.amp import GradScaler, autocast
 import os
+import numpy as np
 from tqdm import tqdm
 
 class ContrastiveLoss(nn.Module):
@@ -90,5 +91,3 @@ def save_checkpoint(model, epoch, path="checkpoints/"):
     save_path = os.path.join(path, f"eeg_encoder_epoch_{epoch}.pth")
     torch.save(model.state_dict(), save_path)
     print(f"Checkpoint saved: {save_path}")
-
-import numpy as np # 用于 ContrastiveLoss 中的 log 计算
