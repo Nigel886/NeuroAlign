@@ -3,8 +3,15 @@ import numpy as np
 import torch
 import mne
 import os
+import re
 from pathlib import Path
 from tqdm import tqdm
+
+def _infer_subject_id_from_filename(path_str):
+    match = re.search(r"Z[A-Z]{2}", str(path_str).upper())
+    if match:
+        return match.group(0)
+    return "UNK"
 
 def clean_eeg_with_mne(data_105, sfreq=1000, target_fs=250):
     """
@@ -74,6 +81,9 @@ def run_advanced_preprocessing(input_mat, output_dir):
     output_path.mkdir(parents=True, exist_ok=True)
     fif_dir = output_path / "fif_cleaned"
     fif_dir.mkdir(exist_ok=True)
+    subject_id = _infer_subject_id_from_filename(Path(input_mat).name)
+    subject_fif_dir = fif_dir / subject_id
+    subject_fif_dir.mkdir(exist_ok=True)
 
     print(f"Loading {input_mat}...")
     mat = scipy.io.loadmat(input_mat, squeeze_me=True, struct_as_record=False)
@@ -81,7 +91,7 @@ def run_advanced_preprocessing(input_mat, output_dir):
     
     processed_list = []
     
-    print(f"Cleaning {len(sentence_data)} sentences with MNE ICA...")
+    print(f"Cleaning {len(sentence_data)} sentences with MNE ICA... (subject={subject_id})")
     for i, sent_obj in enumerate(tqdm(sentence_data)):
         # 1. 句子级原始信号清洗
         raw_eeg = sent_obj.rawData # (105, T)
@@ -91,7 +101,7 @@ def run_advanced_preprocessing(input_mat, output_dir):
             cleaned_raw = clean_eeg_with_mne(raw_eeg, sfreq=1000, target_fs=250)
             
             # 2. 保存为 .fif 格式
-            fif_name = fif_dir / f"sentence_{i:03d}_cleaned.fif"
+            fif_name = subject_fif_dir / f"{subject_id}_sentence_{i:03d}_cleaned.fif"
             cleaned_raw.save(str(fif_name), overwrite=True, verbose=False)
             
             # 3. 提取清洗后的 Word-level 特征
@@ -113,6 +123,7 @@ def run_advanced_preprocessing(input_mat, output_dir):
             
             if len(sentence_eeg_features) > 0:
                 processed_list.append({
+                    'subject_id': subject_id,
                     'sentence_id': i,
                     'content': sent_obj.content,
                     'word_list': word_list,
@@ -123,16 +134,25 @@ def run_advanced_preprocessing(input_mat, output_dir):
             print(f"Error processing sentence {i}: {e}")
 
     # 保存最终用于训练的 .pt 文件
-    torch.save(processed_list, output_path / "processed_zuco_cleaned.pt")
+    torch.save(processed_list, output_path / f"processed_{subject_id}_cleaned.pt")
     print(f"\nPreprocessing complete!")
-    print(f"Cleaned .fif files saved in: {fif_dir}")
-    print(f"Final training data saved as: {output_path / 'processed_zuco_cleaned.pt'}")
+    print(f"Cleaned .fif files saved in: {subject_fif_dir}")
+    print(f"Final training data saved as: {output_path / f'processed_{subject_id}_cleaned.pt'}")
+
+    return processed_list
 
 if __name__ == "__main__":
-    input_file = "./data/resultsZAB_SR.mat"
+    data_dir = Path("./data")
     output_dir = "./data/preprocessed"
-    
-    if os.path.exists(input_file):
-        run_advanced_preprocessing(input_file, output_dir)
-    else:
-        print(f"Input file {input_file} not found.")
+    mat_files = sorted(data_dir.glob("*.mat"))
+    if not mat_files:
+        print(f"No .mat files found in {data_dir.resolve()}")
+        raise SystemExit(1)
+
+    all_processed = []
+    for mat_path in mat_files:
+        all_processed.extend(run_advanced_preprocessing(str(mat_path), output_dir))
+
+    combined_path = Path(output_dir) / "processed_zuco_cleaned.pt"
+    torch.save(all_processed, combined_path)
+    print(f"\nCombined training data saved as: {combined_path}")

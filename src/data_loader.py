@@ -6,7 +6,7 @@ from pathlib import Path
 import re
 
 def _infer_subject_id_from_path(path_str):
-    match = re.search(r"\bZ[A-Z]{2}\b", str(path_str).upper())
+    match = re.search(r"Z[A-Z]{2}", str(path_str).upper())
     if match:
         return match.group(0)
     return None
