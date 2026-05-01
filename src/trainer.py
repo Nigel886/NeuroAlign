@@ -1,16 +1,15 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import math
 from torch.cuda.amp import GradScaler, autocast
 import os
-import numpy as np
 from tqdm import tqdm
 
 class ContrastiveLoss(nn.Module):
     def __init__(self, temperature=0.07):
         super(ContrastiveLoss, self).__init__()
-        self.temperature = temperature
-        self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / temperature))
+        self.logit_scale = nn.Parameter(torch.tensor(math.log(1 / temperature), dtype=torch.float32))
 
     def forward(self, eeg_features, text_features):
         """
@@ -23,7 +22,7 @@ class ContrastiveLoss(nn.Module):
         text_features = F.normalize(text_features, p=2, dim=-1)
         
         # 计算相似度矩阵
-        logits_per_eeg = torch.matmul(eeg_features, text_features.t()) / self.temperature
+        logits_per_eeg = torch.matmul(eeg_features, text_features.t()) * self.logit_scale.exp()
         logits_per_text = logits_per_eeg.t()
         
         # Ground truth: 对角线应该是最相似的
@@ -38,6 +37,12 @@ def train_one_epoch(model, llm, dataloader, optimizer, scaler, device, accumulat
     model.train()
     total_loss = 0
     optimizer.zero_grad()
+
+    criterion = ContrastiveLoss().to(device)
+    existing_params = {id(p) for group in optimizer.param_groups for p in group["params"]}
+    new_params = [p for p in criterion.parameters() if id(p) not in existing_params]
+    if new_params:
+        optimizer.add_param_group({"params": new_params})
     
     pbar = tqdm(dataloader, desc="Training")
     for step, batch in enumerate(pbar):
@@ -67,7 +72,6 @@ def train_one_epoch(model, llm, dataloader, optimizer, scaler, device, accumulat
             eeg_features = model(eeg, src_key_padding_mask=src_key_padding_mask)
             
             # 计算对比损失
-            criterion = ContrastiveLoss().to(device)
             loss = criterion(eeg_features, text_features)
             loss = loss / accumulation_steps # 梯度累积缩放
             
