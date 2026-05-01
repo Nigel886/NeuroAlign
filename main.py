@@ -3,7 +3,7 @@ import argparse
 import os
 from torch.cuda.amp import GradScaler
 from src.model import EEGTransformerEncoder, load_frozen_llm
-from src.data_loader import get_dataloader
+from src.data_loader import get_dataloader, get_loso_loaders
 from src.trainer import train_one_epoch, save_checkpoint
 
 def main(args):
@@ -25,12 +25,22 @@ def main(args):
     ).to(device)
 
     # 4. 准备 DataLoader
-    train_loader = get_dataloader(
-        args.data_path, 
-        args.llm_name, 
-        batch_size=args.batch_size, 
-        shuffle=True
-    )
+    if args.loso_test_subject is not None:
+        train_loader, _ = get_loso_loaders(
+            args.data_path,
+            args.llm_name,
+            test_subject=args.loso_test_subject,
+            train_batch_size=args.batch_size,
+            test_batch_size=max(1, args.batch_size),
+            subject_wise_normalize=True,
+        )
+    else:
+        train_loader = get_dataloader(
+            args.data_path,
+            args.llm_name,
+            batch_size=args.batch_size,
+            shuffle=True,
+        )
 
     # 5. 优化器与混合精度缩放器
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
@@ -54,15 +64,22 @@ def main(args):
         )
         
         print(f"Epoch {epoch}/{args.epochs} - Loss: {epoch_loss:.4f}")
-        
-        # 保存最新权重
-        save_checkpoint(model, "latest")
-        
-        # 保存最佳权重
-        if epoch_loss < best_loss:
-            best_loss = epoch_loss
-            save_checkpoint(model, "best")
-            print(f"New best model saved with loss: {best_loss:.4f}")
+
+        if args.loso_test_subject is not None:
+            if epoch_loss < best_loss:
+                best_loss = epoch_loss
+                save_path = os.path.join(
+                    "checkpoints", f"eeg_encoder_v1_1_loso_{args.loso_test_subject.upper()}.pth"
+                )
+                torch.save(model.state_dict(), save_path)
+                print(f"Checkpoint saved: {save_path}")
+                print(f"New best model saved with loss: {best_loss:.4f}")
+        else:
+            save_checkpoint(model, "latest")
+            if epoch_loss < best_loss:
+                best_loss = epoch_loss
+                save_checkpoint(model, "best")
+                print(f"New best model saved with loss: {best_loss:.4f}")
 
     print("\nTraining completed successfully!")
 
@@ -80,6 +97,7 @@ if __name__ == "__main__":
     parser.add_argument("--batch_size", type=int, default=2, help="Batch size per step (keep small for 8GB VRAM)")
     parser.add_argument("--lr", type=float, default=5e-5, help="Learning rate")
     parser.add_argument("--grad_accum", type=int, default=4, help="Gradient accumulation steps")
+    parser.add_argument("--loso_test_subject", type=str, default=None, help="Leave-One-Subject-Out test subject ID (e.g., ZAB)")
     
     args = parser.parse_args()
     

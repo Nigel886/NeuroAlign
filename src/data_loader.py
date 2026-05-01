@@ -228,6 +228,37 @@ def get_dataloader(
     
     return loader
 
+def get_loso_loaders(
+    pt_path,
+    tokenizer_name,
+    test_subject="ZAB",
+    train_batch_size=2,
+    test_batch_size=4,
+    max_len=512,
+    subject_wise_normalize=True,
+):
+    train_loader = get_dataloader(
+        pt_path,
+        tokenizer_name,
+        batch_size=train_batch_size,
+        shuffle=True,
+        split="train",
+        test_subject_id=test_subject,
+        subject_wise_normalize=subject_wise_normalize,
+        max_len=max_len,
+    )
+    test_loader = get_dataloader(
+        pt_path,
+        tokenizer_name,
+        batch_size=test_batch_size,
+        shuffle=False,
+        split="test",
+        test_subject_id=test_subject,
+        subject_wise_normalize=subject_wise_normalize,
+        max_len=max_len,
+    )
+    return train_loader, test_loader
+
 if __name__ == "__main__":
     # 测试代码
     PT_PATH = "./data/preprocessed/processed_zuco_cleaned.pt"
