@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import math
 from transformers import AutoModelForCausalLM, BitsAndBytesConfig
 
@@ -40,13 +41,11 @@ class EEGTransformerEncoder(nn.Module):
         )
         self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
         
-        # 4. Alignment Head (MLP 层): 512 -> 4096
-        # 使用两层 MLP 配合激活函数以增强非线性映射能力
+        # 4. Alignment Head (MLP 层): 512 -> 2048 -> 4096
         self.alignment_head = nn.Sequential(
-            nn.Linear(d_model, d_model * 2),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(d_model * 2, output_dim)
+            nn.Linear(d_model, 2048),
+            nn.ReLU(),
+            nn.Linear(2048, output_dim)
         )
         
         self.d_model = d_model
@@ -88,7 +87,8 @@ class EEGTransformerEncoder(nn.Module):
             
         # 对齐映射 (512 -> 4096)
         aligned_output = self.alignment_head(pooled_output)
-        
+        aligned_output = F.normalize(aligned_output, p=2, dim=-1)
+
         return aligned_output # (batch, 4096)
 
 def load_frozen_llm(model_name="meta-llama/Meta-Llama-3-8B-Instruct"):
