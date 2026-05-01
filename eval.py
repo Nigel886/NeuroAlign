@@ -40,6 +40,8 @@ def run_retrieval_eval(model, llm, dataloader, device):
             
     all_eeg_features = torch.cat(all_eeg_features, dim=0)
     all_text_features = torch.cat(all_text_features, dim=0)
+    all_eeg_features = F.normalize(all_eeg_features, p=2, dim=-1)
+    all_text_features = F.normalize(all_text_features, p=2, dim=-1)
     
     # 计算相似度矩阵 (N, N)
     similarity = torch.matmul(all_eeg_features, all_text_features.t())
