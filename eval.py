@@ -11,6 +11,24 @@ import argparse
 import json
 import datetime
 
+class _CentroidTracker(torch.nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        self.register_buffer("eeg_centroid", torch.zeros(dim, dtype=torch.float32))
+        self.register_buffer("text_centroid", torch.zeros(dim, dtype=torch.float32))
+        self.register_buffer("_initialized", torch.tensor(False))
+
+def _infer_centroid_dim_from_state(state_dict):
+    if not isinstance(state_dict, dict):
+        return None
+    v = state_dict.get("centroid_tracker.eeg_centroid", None)
+    if v is not None and hasattr(v, "shape") and len(v.shape) == 1:
+        return int(v.shape[0])
+    v = state_dict.get("centroid_tracker.text_centroid", None)
+    if v is not None and hasattr(v, "shape") and len(v.shape) == 1:
+        return int(v.shape[0])
+    return None
+
 def _filter_state_dict_for_model(model, state_dict):
     model_sd = model.state_dict()
     filtered = {}
@@ -63,6 +81,15 @@ def run_retrieval_eval(model, llm, dataloader, device, test_subject_id=None):
     
     print("Extracting embeddings for retrieval...")
     with torch.no_grad():
+        tracker = getattr(model, "centroid_tracker", None)
+        delta = None
+        centering = getattr(model, "centering", None)
+        if centering is not None and hasattr(centering, "delta"):
+            if torch.is_tensor(centering.delta) and centering.delta.numel() > 0:
+                delta = centering.delta.to(device=device, dtype=torch.float32)
+        if tracker is not None and hasattr(tracker, "text_centroid") and hasattr(tracker, "eeg_centroid"):
+            if delta is None:
+                delta = (tracker.text_centroid - tracker.eeg_centroid).to(device=device, dtype=torch.float32)
         for batch in tqdm(dataloader):
             input_ids = batch['input_ids'].to(device)
             attention_mask = batch['attention_mask'].to(device)
@@ -71,8 +98,13 @@ def run_retrieval_eval(model, llm, dataloader, device, test_subject_id=None):
             
             # 1. EEG 嵌入提取
             src_key_padding_mask = (eeg_mask == 0)
-            eeg_feat = model(eeg, src_key_padding_mask=src_key_padding_mask)
-            eeg_feat = F.normalize(eeg_feat, p=2, dim=-1)
+            if delta is not None and hasattr(model, "centering") and model.centering is not None:
+                eeg_feat = model(eeg, src_key_padding_mask=src_key_padding_mask, centering_delta=delta)
+            else:
+                eeg_feat = model(eeg, src_key_padding_mask=src_key_padding_mask)
+                if delta is not None:
+                    eeg_feat = eeg_feat.to(dtype=torch.float32) + delta
+                    eeg_feat = F.normalize(eeg_feat, p=2, dim=-1)
             
             # 2. Text 嵌入提取 (LLM)
             outputs = llm(input_ids=input_ids, attention_mask=attention_mask, output_hidden_states=True)
@@ -245,6 +277,9 @@ def main():
         num_subjects=subject_head["num_subjects"] if subject_head is not None else None,
         subject_hidden_dim=subject_head["subject_hidden_dim"] if subject_head is not None else 256,
     ).to(device)
+    centroid_dim = _infer_centroid_dim_from_state(state)
+    if centroid_dim is not None:
+        model.centroid_tracker = _CentroidTracker(dim=centroid_dim).to(device)
 
     if isinstance(state, dict):
         filtered, dropped = _filter_state_dict_for_model(model, state)
@@ -284,9 +319,8 @@ def main():
         text_feats,
         subject_ids,
         test_subject_id=args.test_subject_id,
-        output_prefix=args.output_prefix,
         output_prefix=os.path.join(output_dir, args.output_prefix),
-
+    )
 
 if __name__ == "__main__":
     main()

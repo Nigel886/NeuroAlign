@@ -6,6 +6,31 @@ from torch.cuda.amp import GradScaler, autocast
 import os
 from tqdm import tqdm
 
+class CentroidTracker(nn.Module):
+    def __init__(self, dim, momentum=0.9):
+        super().__init__()
+        self.momentum = float(momentum)
+        self.register_buffer("eeg_centroid", torch.zeros(dim, dtype=torch.float32))
+        self.register_buffer("text_centroid", torch.zeros(dim, dtype=torch.float32))
+        self.register_buffer("_initialized", torch.tensor(False))
+
+    @torch.no_grad()
+    def update(self, eeg_batch, text_batch):
+        eeg_mean = eeg_batch.detach().to(dtype=torch.float32).mean(dim=0)
+        text_mean = text_batch.detach().to(dtype=torch.float32).mean(dim=0)
+        if not bool(self._initialized.item()):
+            self.eeg_centroid.copy_(eeg_mean)
+            self.text_centroid.copy_(text_mean)
+            self._initialized.fill_(True)
+            return
+        m = self.momentum
+        self.eeg_centroid.mul_(m).add_(eeg_mean, alpha=(1.0 - m))
+        self.text_centroid.mul_(m).add_(text_mean, alpha=(1.0 - m))
+
+    @torch.no_grad()
+    def delta(self):
+        return self.text_centroid - self.eeg_centroid
+
 class ContrastiveLoss(nn.Module):
     def __init__(self, temperature=0.05):
         super(ContrastiveLoss, self).__init__()
@@ -63,13 +88,17 @@ def train_one_epoch(
     total_epochs=1,
     warmup_epochs=5,
     accumulation_steps=4,
+    use_centering=True,
+    centering_momentum=0.9,
 ):
     model.train()
     total_loss = 0
+    total_align = 0
     optimizer.zero_grad()
 
     alignment_weight = 1.5
     gamma_ortho = 0.1
+    centroid_momentum = float(centering_momentum)
     criterion = ContrastiveLoss().to(device)
     existing_params = {id(p) for group in optimizer.param_groups for p in group["params"]}
     new_params = [p for p in criterion.parameters() if id(p) not in existing_params]
@@ -140,12 +169,20 @@ def train_one_epoch(
                     return_decomposed_features=True,
                     grl_alpha=lambda_subject,
                 )
+                if getattr(model, "centroid_tracker", None) is None:
+                    model.centroid_tracker = CentroidTracker(dim=int(text_features.size(-1)), momentum=centroid_momentum).to(device)
+                model.centroid_tracker.update(eeg_features, text_features)
+                delta = model.centroid_tracker.delta().to(device=device, dtype=eeg_features.dtype)
+                if use_centering and hasattr(model, "set_centering_delta"):
+                    model.set_centering_delta(delta)
+                eeg_shifted = eeg_features + delta
                 if subject_logits.size(-1) != len(subject_to_idx):
                     raise ValueError(
                         f"subject_logits dim={subject_logits.size(-1)} but num_subjects={len(subject_to_idx)}. "
                         "Construct model with num_subjects matching the training subjects."
                     )
-                alignment_loss = criterion(eeg_features, text_features) * alignment_weight
+                alignment_loss = criterion(eeg_shifted, text_features) * alignment_weight
+                total_align += float(alignment_loss.detach().item())
                 subject_loss = ce_loss(subject_logits, subject_labels)
                 content_norm = F.normalize(content_features, p=2, dim=-1)
                 style_norm = F.normalize(style_features, p=2, dim=-1)
@@ -154,7 +191,15 @@ def train_one_epoch(
                 loss = alignment_loss + lambda_subject * subject_loss + gamma_ortho * ortho_loss
             else:
                 eeg_features = model(eeg, src_key_padding_mask=src_key_padding_mask)
-                alignment_loss = criterion(eeg_features, text_features) * alignment_weight
+                if getattr(model, "centroid_tracker", None) is None:
+                    model.centroid_tracker = CentroidTracker(dim=int(text_features.size(-1)), momentum=centroid_momentum).to(device)
+                model.centroid_tracker.update(eeg_features, text_features)
+                delta = model.centroid_tracker.delta().to(device=device, dtype=eeg_features.dtype)
+                if use_centering and hasattr(model, "set_centering_delta"):
+                    model.set_centering_delta(delta)
+                eeg_shifted = eeg_features + delta
+                alignment_loss = criterion(eeg_shifted, text_features) * alignment_weight
+                total_align += float(alignment_loss.detach().item())
                 subject_loss = None
                 ortho_loss = None
                 loss = alignment_loss
@@ -182,7 +227,8 @@ def train_one_epoch(
             postfix["ortho"] = float(ortho_loss.detach().item())
         pbar.set_postfix(postfix)
         
-    return total_loss / len(dataloader)
+    denom_batches = max(1, len(dataloader))
+    return (total_loss / denom_batches), (total_align / denom_batches)
 
 def save_checkpoint(model, epoch, path="checkpoints/"):
     if not os.path.exists(path):

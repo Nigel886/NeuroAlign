@@ -53,6 +53,7 @@ def main(args):
         output_dim=target_dim,
         num_subjects=num_subjects,
         subject_hidden_dim=args.subject_hidden_dim,
+        enable_centering=args.use_centering,
     ).to(device)
 
     if args.init_checkpoint is not None:
@@ -98,9 +99,10 @@ def main(args):
     print(f"Gradient Accumulation Steps: {args.grad_accum}")
     
     best_loss = float('inf')
+    best_align = float("inf")
     
     for epoch in range(1, args.epochs + 1):
-        epoch_loss = train_one_epoch(
+        epoch_loss, epoch_align = train_one_epoch(
             model, 
             llm, 
             train_loader, 
@@ -109,28 +111,45 @@ def main(args):
             device, 
             epoch=epoch,
             total_epochs=args.epochs,
-            accumulation_steps=args.grad_accum
+            accumulation_steps=args.grad_accum,
+            use_centering=args.use_centering,
+            centering_momentum=args.centering_momentum,
         )
         
-        print(f"Epoch {epoch}/{args.epochs} - Loss: {epoch_loss:.4f}")
+        print(f"Epoch {epoch}/{args.epochs} - Total Loss: {epoch_loss:.4f} | Align Loss: {epoch_align:.4f}")
 
         if args.loso_test_subject is not None:
-            if epoch_loss < best_loss:
-                best_loss = epoch_loss
-                if args.enable_dann:
-                    save_name = f"eeg_encoder_v1_2_dann_loso_{args.loso_test_subject.upper()}.pth"
-                else:
-                    save_name = f"eeg_encoder_v1_1_loso_{args.loso_test_subject.upper()}.pth"
-                save_path = os.path.join("checkpoints", save_name)
-                torch.save(model.state_dict(), save_path)
-                print(f"Checkpoint saved: {save_path}")
-                print(f"New best model saved with loss: {best_loss:.4f}")
+            version_tag = "v1_4" if args.use_centering else "v1_3"
+            subj = args.loso_test_subject.upper()
+            parts = ["eeg_encoder", version_tag]
+            if args.enable_dann:
+                parts.append("dann")
+            parts.append(f"loso_{subj}")
+            base_name = "_".join(parts)
+            print(f"Run tag: {base_name}")
+            latest_path = os.path.join("checkpoints", f"{base_name}_latest.pth")
+            if args.use_centering and getattr(model, "centroid_tracker", None) is not None and hasattr(model, "set_centering_delta"):
+                model.set_centering_delta(model.centroid_tracker.delta())
+            torch.save(model.state_dict(), latest_path)
+            print(f"Checkpoint saved: {latest_path}")
+
+            if epoch_align < best_align:
+                best_align = epoch_align
+                best_path = os.path.join("checkpoints", f"{base_name}_best.pth")
+                torch.save(model.state_dict(), best_path)
+                print(f"Checkpoint saved: {best_path}")
+                print(f"New best model saved with align loss: {best_align:.4f}")
+
+            if epoch in {15, 20, 25, 30}:
+                snap_path = os.path.join("checkpoints", f"{base_name}_epoch{epoch:02d}.pth")
+                torch.save(model.state_dict(), snap_path)
+                print(f"Checkpoint saved: {snap_path}")
         else:
             save_checkpoint(model, "latest")
-            if epoch_loss < best_loss:
-                best_loss = epoch_loss
+            if epoch_align < best_align:
+                best_align = epoch_align
                 save_checkpoint(model, "best")
-                print(f"New best model saved with loss: {best_loss:.4f}")
+                print(f"New best model saved with align loss: {best_align:.4f}")
 
     print("\nTraining completed successfully!")
 
@@ -153,6 +172,10 @@ if __name__ == "__main__":
     parser.add_argument("--subject_hidden_dim", type=int, default=256, help="Hidden dim of subject classifier MLP (v1.2)")
     parser.add_argument("--lr_subject", type=float, default=1e-5, help="Learning rate for subject_classifier branch (v1.2)")
     parser.add_argument("--init_checkpoint", type=str, default=None, help="Initialize model weights from a checkpoint (compatible load)")
+    parser.add_argument("--use_centering", action="store_true", help="Enable v1.4 centering delta in AlignmentHead")
+    parser.add_argument("--no_centering", dest="use_centering", action="store_false", help="Disable v1.4 centering delta in AlignmentHead")
+    parser.set_defaults(use_centering=True)
+    parser.add_argument("--centering_momentum", type=float, default=0.9, help="EMA momentum for centroid tracking (v1.4)")
     
     args = parser.parse_args()
     

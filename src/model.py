@@ -31,6 +31,31 @@ class PositionalEncoding(nn.Module):
         x = x + self.pe[:, :x.size(1), :]
         return self.dropout(x)
 
+class CenteringLayer(nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        self.register_buffer("delta", torch.zeros(int(dim), dtype=torch.float32))
+
+    @torch.no_grad()
+    def set_delta(self, delta):
+        if delta is None:
+            self.delta.zero_()
+            return
+        d = delta.detach()
+        if d.dim() != 1:
+            d = d.view(-1)
+        self.delta.copy_(d.to(device=self.delta.device, dtype=self.delta.dtype))
+
+    def forward(self, x, delta=None):
+        if delta is None:
+            d = self.delta
+        else:
+            d = delta
+            if d.dim() != 1:
+                d = d.view(-1)
+            d = d.to(device=x.device, dtype=x.dtype)
+        return x + d
+
 class EEGTransformerEncoder(nn.Module):
     def __init__(
         self,
@@ -45,6 +70,7 @@ class EEGTransformerEncoder(nn.Module):
         subject_hidden_dim=256,
         content_dim=384,
         style_dim=128,
+        enable_centering=True,
     ):
         super(EEGTransformerEncoder, self).__init__()
         
@@ -75,6 +101,7 @@ class EEGTransformerEncoder(nn.Module):
             nn.ReLU(),
             nn.Linear(2048, output_dim)
         )
+        self.centering = CenteringLayer(output_dim) if enable_centering else None
 
         self.subject_classifier = (
             nn.Sequential(
@@ -112,6 +139,7 @@ class EEGTransformerEncoder(nn.Module):
         return_subject_logits=False,
         return_decomposed_features=False,
         grl_alpha=1.0,
+        centering_delta=None,
     ):
         """
         src: (batch_size, seq_len, input_dim)
@@ -140,6 +168,8 @@ class EEGTransformerEncoder(nn.Module):
 
         # 对齐映射 (384 -> 4096)
         aligned_output = self.alignment_head(content_features)
+        if self.centering is not None:
+            aligned_output = self.centering(aligned_output, delta=centering_delta)
         aligned_output = F.normalize(aligned_output, p=2, dim=-1)
 
         if return_subject_logits:
@@ -154,6 +184,11 @@ class EEGTransformerEncoder(nn.Module):
         if return_decomposed_features:
             return aligned_output, content_features, style_features
         return aligned_output
+
+    @torch.no_grad()
+    def set_centering_delta(self, delta):
+        if self.centering is not None:
+            self.centering.set_delta(delta)
 
 def load_frozen_llm(model_name="meta-llama/Meta-Llama-3-8B-Instruct"):
     """
