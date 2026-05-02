@@ -73,6 +73,33 @@ def process_word_eeg(eeg_data):
     else:
         return np.zeros(105)
 
+def compute_ea_reference(all_samples, eps=1e-5):
+    if not all_samples:
+        raise ValueError("all_samples is empty")
+    covs = []
+    for sample in all_samples:
+        x = sample.get("eeg_features", None)
+        if x is None:
+            continue
+        x = np.asarray(x)
+        if x.ndim != 2 or x.shape[1] != 105:
+            continue
+        if x.shape[0] < 2:
+            continue
+        x = x - np.mean(x, axis=0, keepdims=True)
+        cov = (x.T @ x) / float(x.shape[0] - 1)
+        covs.append(cov)
+    if not covs:
+        raise ValueError("No valid eeg_features found to compute EA reference")
+    r = np.mean(np.stack(covs, axis=0), axis=0)
+    r = 0.5 * (r + r.T)
+    r = r + np.eye(r.shape[0], dtype=r.dtype) * float(eps)
+    eigvals, eigvecs = np.linalg.eigh(r)
+    eigvals = np.maximum(eigvals, float(eps))
+    inv_sqrt = eigvecs @ np.diag(1.0 / np.sqrt(eigvals)) @ eigvecs.T
+    inv_sqrt = 0.5 * (inv_sqrt + inv_sqrt.T)
+    return inv_sqrt.astype(np.float32)
+
 def run_advanced_preprocessing(input_mat, output_dir):
     """
     完整清洗流程：加载 -> MNE 清洗 -> 保存 .fif -> 提取特征保存 .pt
@@ -132,6 +159,13 @@ def run_advanced_preprocessing(input_mat, output_dir):
                 
         except Exception as e:
             print(f"Error processing sentence {i}: {e}")
+
+    if processed_list:
+        ea_inv_sqrt = compute_ea_reference(processed_list)
+        for sample in processed_list:
+            x = np.asarray(sample["eeg_features"], dtype=np.float32)
+            x = x - np.mean(x, axis=0, keepdims=True)
+            sample["eeg_features"] = (x @ ea_inv_sqrt).astype(np.float32)
 
     # 保存最终用于训练的 .pt 文件
     torch.save(processed_list, output_path / f"processed_{subject_id}_cleaned.pt")

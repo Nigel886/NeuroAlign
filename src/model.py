@@ -43,6 +43,8 @@ class EEGTransformerEncoder(nn.Module):
         output_dim=4096,
         num_subjects=None,
         subject_hidden_dim=256,
+        content_dim=384,
+        style_dim=128,
     ):
         super(EEGTransformerEncoder, self).__init__()
         
@@ -62,16 +64,21 @@ class EEGTransformerEncoder(nn.Module):
         )
         self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
         
-        # 4. Alignment Head (MLP 层): 512 -> 2048 -> 4096
+        if int(content_dim) + int(style_dim) != int(d_model):
+            raise ValueError(f"content_dim({content_dim}) + style_dim({style_dim}) must equal d_model({d_model})")
+        self.content_dim = int(content_dim)
+        self.style_dim = int(style_dim)
+
+        # 4. Alignment Head (MLP 层): 384 -> 2048 -> 4096
         self.alignment_head = nn.Sequential(
-            nn.Linear(d_model, 2048),
+            nn.Linear(self.content_dim, 2048),
             nn.ReLU(),
             nn.Linear(2048, output_dim)
         )
 
         self.subject_classifier = (
             nn.Sequential(
-                nn.Linear(d_model, int(subject_hidden_dim)),
+                nn.Linear(self.style_dim, int(subject_hidden_dim)),
                 nn.ReLU(),
                 nn.Linear(int(subject_hidden_dim), int(num_subjects)),
             )
@@ -98,7 +105,14 @@ class EEGTransformerEncoder(nn.Module):
                     nn.init.xavier_uniform_(m.weight)
                     nn.init.constant_(m.bias, 0)
 
-    def forward(self, src, src_key_padding_mask=None, return_subject_logits=False, grl_alpha=1.0):
+    def forward(
+        self,
+        src,
+        src_key_padding_mask=None,
+        return_subject_logits=False,
+        return_decomposed_features=False,
+        grl_alpha=1.0,
+    ):
         """
         src: (batch_size, seq_len, input_dim)
         src_key_padding_mask: (batch_size, seq_len)
@@ -121,18 +135,25 @@ class EEGTransformerEncoder(nn.Module):
         else:
             pooled_output = torch.mean(output, dim=1)
             
-        # 对齐映射 (512 -> 4096)
-        aligned_output = self.alignment_head(pooled_output)
+        content_features = pooled_output[:, : self.content_dim]
+        style_features = pooled_output[:, self.content_dim : self.content_dim + self.style_dim]
+
+        # 对齐映射 (384 -> 4096)
+        aligned_output = self.alignment_head(content_features)
         aligned_output = F.normalize(aligned_output, p=2, dim=-1)
 
         if return_subject_logits:
             if self.subject_classifier is None:
                 raise ValueError("Subject classifier is not enabled. Set num_subjects when constructing the model.")
-            rev = ReverseLayerF.apply(pooled_output, grl_alpha)
+            rev = ReverseLayerF.apply(style_features, grl_alpha)
             subject_logits = self.subject_classifier(rev)
+            if return_decomposed_features:
+                return aligned_output, subject_logits, content_features, style_features
             return aligned_output, subject_logits
 
-        return aligned_output # (batch, 4096)
+        if return_decomposed_features:
+            return aligned_output, content_features, style_features
+        return aligned_output
 
 def load_frozen_llm(model_name="meta-llama/Meta-Llama-3-8B-Instruct"):
     """

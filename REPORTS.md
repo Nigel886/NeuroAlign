@@ -4,6 +4,36 @@ This document tracks the iterative development of the NeuroAlign framework, focu
 
 ---
 
+## [v1.3] 2026-05-02 - Feature Disentanglement: Recovery of Semantic Utility
+
+**Objective:** Implement a "Split-Head" architecture to decouple semantic intent (Content) from subject identity (Style), and introduce Euclidean Alignment (EA) for raw signal calibration.
+
+### 📊 Performance Metrics (The Semantic Recovery):
+
+|**Metric**|**v1.2.1 (Warmup)**|**v1.3 (Disentanglement)**|**Growth**|
+|---|---|---|---|
+|**Seen Top-1 Accuracy**|0.86%|**2.10%**|**+144%**|
+|**Seen Top-5 Accuracy**|3.76%|**14.04%**|**+273%**|
+|**Unseen Top-1 (ZAB)**|0.13%|**0.13%**|➡️ Plateau|
+|**Unseen Top-5 (ZAB)**|0.51%|**0.26%**|📉 Precision Drop|
+
+### 🔍 Technical Diagnosis:
+
+1. **Successful Recovery:** The massive jump in _Seen_ performance proves that the "Split-Head" architecture successfully shielded the semantic branch from adversarial erasure. The model can now "forget" who a person is without "forgetting" what they are thinking.
+    
+2. **The Unseen Plateau:** ZAB's Top-1 performance remained at 0.13%. t-SNE analysis confirms that while subjects are well-mixed, the entire EEG manifold is still physically distant from the Text manifold. This confirms a persistent **Modality Gap** that simple alignment cannot bridge.
+    
+3. **Orthogonality Success:** Orthogonality loss was confirmed to prevent identity-leakage into the content head, ensuring that the alignment was truly based on invariant semantic features.
+    
+
+### 💡 Next Steps (v1.4 Evolution):
+
+- **Domain Probing:** Since ZAB is a "cold start" brain, we may need a small **Calibration Probing** phase (e.g., using 5-10 sentences from the target) to shift the manifold center.
+    
+- **Cross-Modal Centering:** Implementing a global bias correction to pull the EEG and Text clusters together in the latent space.
+
+---
+
 ## [v1.2.1] 2026-05-02 - Curricular Adversarial Alignment: Breaking the 0% Barrier
 
 **Objective:** Mitigate the "Semantic Erasure" effect observed in v1.2 by implementing a dynamic $\lambda$-Warmup scheduler and differential learning rates.
