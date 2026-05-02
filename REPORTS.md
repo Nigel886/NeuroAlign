@@ -3,6 +3,37 @@
 This document tracks the iterative development of the NeuroAlign framework, focusing on the alignment between EEG signals and LLM semantic embeddings.
 
 ---
+
+## [v1.2] 2026-05-02 - Adversarial Domain Adaptation (DANN) Initial Test
+
+**Objective:** Implement Domain Adversarial Neural Networks (DANN) with a Gradient Reversal Layer (GRL) to achieve subject-invariant feature extraction.
+
+### 📊 Performance Metrics (Adversarial Collapse):
+
+|**Metric**|**v1.1 (LOSO Baseline)**|**v1.2 (DANN Initial)**|**Trend**|
+|---|---|---|---|
+|**Seen Top-1 Acc**|8.95%|**0.13%**|📉 Severe Drop|
+|**Unseen Top-1 (ZAB)**|0.00%|**0.00%**|➡️ Stagnant|
+|**Seen Top-5 Acc**|47.90%|**1.02%**|📉 Semantic Collapse|
+|**Subject Mixing**|Moderate (Clustered)|**Extreme (Fully Mixed)**|✅ **Alignment Success**|
+
+### 🔍 Technical Post-mortem:
+
+1. **Semantic Erasure:** The adversarial subject classifier was too potent. To "hide" the subject's identity from the discriminator, the EEG Encoder opted to destroy all distinguishable features, including the critical semantic information needed for LLM alignment.
+    
+2. **Adversarial Weight ($\lambda$) Sensitivity:** Using a static $\lambda=1.0$ from the start of training prevented the model from establishing a stable semantic manifold. The "Modality Gap" observed in t-SNE expanded significantly as EEG embeddings drifted into a non-semantic noise cluster.
+    
+3. **Subject Invariance vs. Task Utility:** While t-SNE (ref: `tsne_v1_2_dann_loso_ZAB_subjects.png`) confirms that subject-specific boundaries have been successfully erased, the resulting "universal" features lack the granularity required for zero-shot retrieval.
+    
+
+### 💡 Next Steps (v1.2.1 Evolution):
+
+- **$\lambda$-Warmup Strategy:** Implement a dynamic scheduler for the adversarial loss, allowing the model to prioritize semantic alignment in early epochs before introducing the identity-erasure constraint.
+    
+- **Feature Decoupling:** Explore a dual-encoder or multi-head approach to more effectively separate "Neural Identity" from "Neural Intent."
+
+---
+
 ## [v1.1] 2026-05-02 - The Reality Check: LOSO Validation
 
 **Objective:** Evaluate cross-subject generalization using Leave-One-Subject-Out (LOSO) on ZAB.
