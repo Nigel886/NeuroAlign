@@ -33,7 +33,32 @@ class ContrastiveLoss(nn.Module):
         
         return (loss_eeg + loss_text) / 2
 
-def train_one_epoch(model, llm, dataloader, optimizer, scaler, device, accumulation_steps=4):
+def _build_subject_mapping(dataloader):
+    dataset = getattr(dataloader, "dataset", None)
+    items = getattr(dataset, "data", None) if dataset is not None else None
+    if not isinstance(items, list):
+        return {}
+    subject_ids = []
+    for it in items:
+        if isinstance(it, dict) and it.get("subject_id") is not None:
+            subject_ids.append(str(it["subject_id"]).upper())
+    subject_ids = sorted({sid for sid in subject_ids if sid != "UNK"})
+    return {sid: i for i, sid in enumerate(subject_ids)}
+
+def _linear_warmup_to_one(progress):
+    return float(max(0.0, min(1.0, progress)))
+
+def train_one_epoch(
+    model,
+    llm,
+    dataloader,
+    optimizer,
+    scaler,
+    device,
+    epoch=1,
+    total_epochs=1,
+    accumulation_steps=4,
+):
     model.train()
     total_loss = 0
     optimizer.zero_grad()
@@ -43,6 +68,9 @@ def train_one_epoch(model, llm, dataloader, optimizer, scaler, device, accumulat
     new_params = [p for p in criterion.parameters() if id(p) not in existing_params]
     if new_params:
         optimizer.add_param_group({"params": new_params})
+
+    ce_loss = nn.CrossEntropyLoss(ignore_index=-1).to(device)
+    subject_to_idx = _build_subject_mapping(dataloader)
     
     pbar = tqdm(dataloader, desc="Training")
     for step, batch in enumerate(pbar):
@@ -66,14 +94,51 @@ def train_one_epoch(model, llm, dataloader, optimizer, scaler, device, accumulat
             text_mask = attention_mask.unsqueeze(-1).float()
             text_features = torch.sum(last_hidden_state * text_mask, dim=1) / torch.sum(text_mask, dim=1).clamp(min=1e-9)
         
+        denom = max(1, total_epochs * len(dataloader))
+        progress = ((epoch - 1) * len(dataloader) + step) / denom
+        lambda_subject = _linear_warmup_to_one(progress)
+
+        subject_ids = batch.get("subject_ids", None)
+        use_subject = (
+            getattr(model, "subject_classifier", None) is not None
+            and isinstance(subject_ids, list)
+            and len(subject_to_idx) > 0
+        )
+        if use_subject:
+            labels = []
+            for sid in subject_ids:
+                if sid is None:
+                    labels.append(-1)
+                else:
+                    labels.append(subject_to_idx.get(str(sid).upper(), -1))
+            subject_labels = torch.tensor(labels, dtype=torch.long, device=device)
+        else:
+            subject_labels = None
+
         # 2. 混合精度前向传播
         with autocast():
-            # 提取 EEG 特征并映射到 4096 维
-            eeg_features = model(eeg, src_key_padding_mask=src_key_padding_mask)
-            
-            # 计算对比损失
-            loss = criterion(eeg_features, text_features)
-            loss = loss / accumulation_steps # 梯度累积缩放
+            if use_subject:
+                eeg_features, subject_logits = model(
+                    eeg,
+                    src_key_padding_mask=src_key_padding_mask,
+                    return_subject_logits=True,
+                    grl_alpha=lambda_subject,
+                )
+                if subject_logits.size(-1) != len(subject_to_idx):
+                    raise ValueError(
+                        f"subject_logits dim={subject_logits.size(-1)} but num_subjects={len(subject_to_idx)}. "
+                        "Construct model with num_subjects matching the training subjects."
+                    )
+                alignment_loss = criterion(eeg_features, text_features)
+                subject_loss = ce_loss(subject_logits, subject_labels)
+                loss = alignment_loss + lambda_subject * subject_loss
+            else:
+                eeg_features = model(eeg, src_key_padding_mask=src_key_padding_mask)
+                alignment_loss = criterion(eeg_features, text_features)
+                subject_loss = None
+                loss = alignment_loss
+
+            loss = loss / accumulation_steps
             
         # 3. 反向传播
         scaler.scale(loss).backward()
@@ -85,7 +150,14 @@ def train_one_epoch(model, llm, dataloader, optimizer, scaler, device, accumulat
             optimizer.zero_grad()
             
         total_loss += loss.item() * accumulation_steps
-        pbar.set_postfix({'loss': loss.item() * accumulation_steps})
+        postfix = {
+            "loss": loss.item() * accumulation_steps,
+            "lambda": float(lambda_subject),
+        }
+        postfix["align"] = float(alignment_loss.detach().item())
+        if subject_loss is not None:
+            postfix["subj"] = float(subject_loss.detach().item())
+        pbar.set_postfix(postfix)
         
     return total_loss / len(dataloader)
 

@@ -60,6 +60,8 @@ def main(args):
             optimizer, 
             scaler, 
             device, 
+            epoch=epoch,
+            total_epochs=args.epochs,
             accumulation_steps=args.grad_accum
         )
         
