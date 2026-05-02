@@ -35,6 +35,9 @@ class ContrastiveLoss(nn.Module):
 
 def _build_subject_mapping(dataloader):
     dataset = getattr(dataloader, "dataset", None)
+    subject_to_idx = getattr(dataset, "subject_to_idx", None) if dataset is not None else None
+    if isinstance(subject_to_idx, dict) and len(subject_to_idx) > 0:
+        return {str(k).upper(): int(v) for k, v in subject_to_idx.items()}
     items = getattr(dataset, "data", None) if dataset is not None else None
     if not isinstance(items, list):
         return {}
@@ -99,19 +102,23 @@ def train_one_epoch(
         lambda_subject = _linear_warmup_to_one(progress)
 
         subject_ids = batch.get("subject_ids", None)
+        batch_subject_labels = batch.get("subject_labels", None)
         use_subject = (
             getattr(model, "subject_classifier", None) is not None
-            and isinstance(subject_ids, list)
             and len(subject_to_idx) > 0
+            and (torch.is_tensor(batch_subject_labels) or isinstance(subject_ids, list))
         )
         if use_subject:
-            labels = []
-            for sid in subject_ids:
-                if sid is None:
-                    labels.append(-1)
-                else:
-                    labels.append(subject_to_idx.get(str(sid).upper(), -1))
-            subject_labels = torch.tensor(labels, dtype=torch.long, device=device)
+            if torch.is_tensor(batch_subject_labels):
+                subject_labels = batch_subject_labels.to(device=device, dtype=torch.long)
+            else:
+                labels = []
+                for sid in subject_ids:
+                    if sid is None:
+                        labels.append(-1)
+                    else:
+                        labels.append(subject_to_idx.get(str(sid).upper(), -1))
+                subject_labels = torch.tensor(labels, dtype=torch.long, device=device)
         else:
             subject_labels = None
 
