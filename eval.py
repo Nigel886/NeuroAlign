@@ -8,6 +8,8 @@ from src.model import EEGTransformerEncoder, load_frozen_llm
 from src.data_loader import get_dataloader
 import os
 import argparse
+import json
+import datetime
 
 def _filter_state_dict_for_model(model, state_dict):
     model_sd = model.state_dict()
@@ -97,6 +99,11 @@ def run_retrieval_eval(model, llm, dataloader, device, test_subject_id=None):
     print(f"\nRetrieval Results (EEG -> Text):")
     print(f"Top-1 Accuracy (All): {top1_all*100:.2f}%")
     print(f"Top-5 Accuracy (All): {top5_all*100:.2f}%")
+    metrics = {
+        "num_samples": int(num_samples),
+        "top1_all": float(top1_all),
+        "top5_all": float(top5_all),
+    }
 
     test_subject = str(test_subject_id).upper() if test_subject_id is not None else None
     if test_subject and any(s is not None for s in all_subject_ids):
@@ -108,13 +115,20 @@ def run_retrieval_eval(model, llm, dataloader, device, test_subject_id=None):
             top1_u, top5_u = _compute_topk(similarity, 5, unseen_idx)
             print(f"Top-1 Accuracy (Unseen={test_subject}): {top1_u*100:.2f}%")
             print(f"Top-5 Accuracy (Unseen={test_subject}): {top5_u*100:.2f}%")
+            metrics["top1_unseen"] = float(top1_u)
+            metrics["top5_unseen"] = float(top5_u)
+            metrics["unseen_subject_id"] = str(test_subject)
+            metrics["num_unseen"] = int(unseen_idx.numel())
         if seen_mask.any():
             seen_idx = torch.from_numpy(np.where(seen_mask)[0]).long()
             top1_s, top5_s = _compute_topk(similarity, 5, seen_idx)
             print(f"Top-1 Accuracy (Seen): {top1_s*100:.2f}%")
             print(f"Top-5 Accuracy (Seen): {top5_s*100:.2f}%")
+            metrics["top1_seen"] = float(top1_s)
+            metrics["top5_seen"] = float(top5_s)
+            metrics["num_seen"] = int(seen_idx.numel())
     
-    return all_eeg_features.numpy(), all_text_features.numpy(), all_subject_ids
+    return all_eeg_features.numpy(), all_text_features.numpy(), all_subject_ids, metrics
 
 def _run_tsne(eeg_feats, text_feats):
     num_samples = eeg_feats.shape[0]
@@ -175,6 +189,37 @@ def visualize_tsne_loso(eeg_feats, text_feats, subject_ids, test_subject_id=None
         plt.savefig(out_unseen, dpi=200, bbox_inches="tight")
         print(f"t-SNE plot saved to {out_unseen}")
 
+def _safe_name(s: str) -> str:
+    invalid = '<>:"/\\|?*'
+    out = "".join("_" if c in invalid else c for c in s)
+    out = out.replace(" ", "_")
+    while "__" in out:
+        out = out.replace("__", "_")
+    return out.strip("._")
+
+def _make_output_dir(out_dir, output_prefix, test_subject_id, checkpoint_path):
+    if out_dir:
+        base = out_dir
+    else:
+        date_str = datetime.date.today().isoformat()
+        ckpt = os.path.splitext(os.path.basename(checkpoint_path))[0] if checkpoint_path else "no_ckpt"
+        parts = [date_str, ckpt]
+        if test_subject_id:
+            parts.append(f"LOSO_{str(test_subject_id).upper()}")
+        if output_prefix and output_prefix != "tsne":
+            parts.append(str(output_prefix))
+        run_name = _safe_name("_".join(parts))
+        base = os.path.join("outputs", run_name)
+
+    base = os.path.abspath(base)
+    candidate = base
+    suffix = 1
+    while os.path.exists(candidate):
+        candidate = f"{base}_{suffix:02d}"
+        suffix += 1
+    os.makedirs(candidate, exist_ok=True)
+    return candidate
+
 def main():
     parser = argparse.ArgumentParser(description="NeuroAlign Evaluation (Retrieval + LOSO analysis)")
     parser.add_argument("--data_path", type=str, default="./data/preprocessed/processed_zuco_cleaned.pt")
@@ -184,6 +229,7 @@ def main():
     parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--test_subject_id", type=str, default=None)
     parser.add_argument("--output_prefix", type=str, default="tsne")
+    parser.add_argument("--out_dir", type=str, default=None)
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -216,16 +262,31 @@ def main():
         subject_wise_normalize=True,
     )
 
-    eeg_feats, text_feats, subject_ids = run_retrieval_eval(
+    output_dir = _make_output_dir(args.out_dir, args.output_prefix, args.test_subject_id, args.checkpoint)
+    print(f"\nOutputs will be saved to: {output_dir}")
+
+    eeg_feats, text_feats, subject_ids, metrics = run_retrieval_eval(
         model, llm, dataloader, device, test_subject_id=args.test_subject_id
     )
+    metrics_payload = {
+        "checkpoint": os.path.abspath(args.checkpoint),
+        "data_path": os.path.abspath(args.data_path),
+        "llm_name": args.llm_name,
+        "tokenizer_name": args.tokenizer_name,
+        "batch_size": int(args.batch_size),
+        "test_subject_id": args.test_subject_id,
+        "metrics": metrics,
+    }
+    with open(os.path.join(output_dir, "metrics.json"), "w", encoding="utf-8") as f:
+        json.dump(metrics_payload, f, ensure_ascii=False, indent=2)
     visualize_tsne_loso(
         eeg_feats,
         text_feats,
         subject_ids,
         test_subject_id=args.test_subject_id,
         output_prefix=args.output_prefix,
-    )
+        output_prefix=os.path.join(output_dir, args.output_prefix),
+
 
 if __name__ == "__main__":
     main()
