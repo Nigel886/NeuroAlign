@@ -7,7 +7,7 @@ import os
 from tqdm import tqdm
 
 class ContrastiveLoss(nn.Module):
-    def __init__(self, temperature=0.07):
+    def __init__(self, temperature=0.05):
         super(ContrastiveLoss, self).__init__()
         self.logit_scale = nn.Parameter(torch.tensor(math.log(1 / temperature), dtype=torch.float32))
 
@@ -68,6 +68,7 @@ def train_one_epoch(
     total_loss = 0
     optimizer.zero_grad()
 
+    alignment_weight = 1.5
     criterion = ContrastiveLoss().to(device)
     existing_params = {id(p) for group in optimizer.param_groups for p in group["params"]}
     new_params = [p for p in criterion.parameters() if id(p) not in existing_params]
@@ -142,12 +143,12 @@ def train_one_epoch(
                         f"subject_logits dim={subject_logits.size(-1)} but num_subjects={len(subject_to_idx)}. "
                         "Construct model with num_subjects matching the training subjects."
                     )
-                alignment_loss = criterion(eeg_features, text_features)
+                alignment_loss = criterion(eeg_features, text_features) * alignment_weight
                 subject_loss = ce_loss(subject_logits, subject_labels)
                 loss = alignment_loss + lambda_subject * subject_loss
             else:
                 eeg_features = model(eeg, src_key_padding_mask=src_key_padding_mask)
-                alignment_loss = criterion(eeg_features, text_features)
+                alignment_loss = criterion(eeg_features, text_features) * alignment_weight
                 subject_loss = None
                 loss = alignment_loss
 

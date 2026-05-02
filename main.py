@@ -55,8 +55,42 @@ def main(args):
         subject_hidden_dim=args.subject_hidden_dim,
     ).to(device)
 
-    # 5. 优化器与混合精度缩放器
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
+    if args.init_checkpoint is not None:
+        if not os.path.exists(args.init_checkpoint):
+            raise ValueError(f"init_checkpoint not found: {args.init_checkpoint}")
+        raw_state = torch.load(args.init_checkpoint, map_location="cpu")
+        model_sd = model.state_dict()
+        filtered = {}
+        dropped = 0
+        for k, v in raw_state.items():
+            if k in model_sd and hasattr(v, "shape") and hasattr(model_sd[k], "shape") and v.shape == model_sd[k].shape:
+                filtered[k] = v
+            else:
+                dropped += 1
+        missing, unexpected = model.load_state_dict(filtered, strict=False)
+        print(
+            f"Initialized from checkpoint: {args.init_checkpoint} "
+            f"(dropped={dropped}, missing={len(missing)}, unexpected={len(unexpected)})"
+        )
+
+    # 5. 优化器与混合精度缩放器（Differential LR）
+    subject_params = []
+    main_params = []
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        if name.startswith("subject_classifier."):
+            subject_params.append(param)
+        else:
+            main_params.append(param)
+
+    param_groups = [
+        {"params": main_params, "lr": args.lr, "weight_decay": 1e-4},
+    ]
+    if len(subject_params) > 0:
+        param_groups.append({"params": subject_params, "lr": args.lr_subject, "weight_decay": 1e-4})
+
+    optimizer = torch.optim.AdamW(param_groups)
     scaler = GradScaler()
 
     # 6. 训练循环
@@ -117,6 +151,8 @@ if __name__ == "__main__":
     parser.add_argument("--loso_test_subject", type=str, default=None, help="Leave-One-Subject-Out test subject ID (e.g., ZAB)")
     parser.add_argument("--enable_dann", action="store_true", help="Enable DANN-style subject-adversarial training (v1.2)")
     parser.add_argument("--subject_hidden_dim", type=int, default=256, help="Hidden dim of subject classifier MLP (v1.2)")
+    parser.add_argument("--lr_subject", type=float, default=1e-5, help="Learning rate for subject_classifier branch (v1.2)")
+    parser.add_argument("--init_checkpoint", type=str, default=None, help="Initialize model weights from a checkpoint (compatible load)")
     
     args = parser.parse_args()
     

@@ -9,6 +9,40 @@ from src.data_loader import get_dataloader
 import os
 import argparse
 
+def _filter_state_dict_for_model(model, state_dict):
+    model_sd = model.state_dict()
+    filtered = {}
+    dropped = 0
+    for k, v in state_dict.items():
+        if k in model_sd and hasattr(v, "shape") and hasattr(model_sd[k], "shape") and v.shape == model_sd[k].shape:
+            filtered[k] = v
+        else:
+            dropped += 1
+    return filtered, dropped
+
+def _infer_subject_head_dims_from_state(state_dict):
+    keys = list(state_dict.keys())
+    if not any(k.startswith("subject_classifier.") for k in keys):
+        return None
+    num_subjects = None
+    subject_hidden_dim = None
+    for k, v in state_dict.items():
+        if k.endswith("subject_classifier.2.weight") and hasattr(v, "shape") and len(v.shape) == 2:
+            num_subjects = int(v.shape[0])
+        if k.endswith("subject_classifier.0.weight") and hasattr(v, "shape") and len(v.shape) == 2:
+            subject_hidden_dim = int(v.shape[0])
+    if num_subjects is None:
+        for k, v in state_dict.items():
+            if k.endswith("subject_classifier.2.bias") and hasattr(v, "shape") and len(v.shape) == 1:
+                num_subjects = int(v.shape[0])
+                break
+    if num_subjects is None:
+        return None
+    return {
+        "num_subjects": num_subjects,
+        "subject_hidden_dim": subject_hidden_dim if subject_hidden_dim is not None else 256,
+    }
+
 def _compute_topk(similarity, k, query_indices):
     labels = torch.arange(similarity.size(0), device=similarity.device)
     _, indices = similarity.topk(k, dim=1)
@@ -155,15 +189,21 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     llm, target_dim = load_frozen_llm(args.llm_name)
 
-    model = EEGTransformerEncoder(output_dim=target_dim).to(device)
+    state = None
     if os.path.exists(args.checkpoint):
-        state = torch.load(args.checkpoint, map_location=device)
-        missing, unexpected = model.load_state_dict(state, strict=False)
-        print(f"Loaded checkpoint from {args.checkpoint}")
-        if missing:
-            print(f"Missing keys: {len(missing)}")
-        if unexpected:
-            print(f"Unexpected keys: {len(unexpected)}")
+        state = torch.load(args.checkpoint, map_location="cpu")
+
+    subject_head = _infer_subject_head_dims_from_state(state) if isinstance(state, dict) else None
+    model = EEGTransformerEncoder(
+        output_dim=target_dim,
+        num_subjects=subject_head["num_subjects"] if subject_head is not None else None,
+        subject_hidden_dim=subject_head["subject_hidden_dim"] if subject_head is not None else 256,
+    ).to(device)
+
+    if isinstance(state, dict):
+        filtered, dropped = _filter_state_dict_for_model(model, state)
+        missing, unexpected = model.load_state_dict(filtered, strict=False)
+        print(f"Loaded checkpoint from {args.checkpoint} (dropped={dropped}, missing={len(missing)}, unexpected={len(unexpected)})")
     else:
         print(f"Warning: checkpoint not found: {args.checkpoint}. Running evaluation with random weights.")
 
