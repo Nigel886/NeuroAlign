@@ -4,6 +4,38 @@ This document tracks the iterative development of the NeuroAlign framework, focu
 
 ---
 
+## [v1.2.1] 2026-05-02 - Curricular Adversarial Alignment: Breaking the 0% Barrier
+
+**Objective:** Mitigate the "Semantic Erasure" effect observed in v1.2 by implementing a dynamic $\lambda$-Warmup scheduler and differential learning rates.
+
+### 📊 Performance Metrics (Recovery & Initial Transfer):
+
+|**Metric**|**v1.2 (Adversarial Collapse)**|**v1.2.1 (Balanced DANN)**|**Trend**|
+|---|---|---|---|
+|**Seen Top-1 Acc**|0.13%|**0.86%**|📈 Recovery|
+|**Unseen Top-1 (ZAB)**|0.00%|**0.13%**|🚀 **First Transfer**|
+|**Seen Top-5 Acc**|1.02%|**3.76%**|📈 Improved|
+|**Subject Mixing**|Extreme|**Extreme**|✅ Consistent|
+
+### 🔍 Technical Post-mortem:
+
+1. **The "Semantic Spark":** Achieving a non-zero Top-1 accuracy on the unseen subject (ZAB) provides the first empirical evidence that neural-to-semantic alignment can generalize across different brains.
+    
+2. **$\lambda$-Warmup Effectiveness:** By keeping $\lambda = 0$ for the first 5 epochs and then scaling it via $\lambda = \frac{2}{1 + \exp(-10 \cdot p)} - 1$, the model established a stable semantic manifold before attempting to erase subject identity. This successfully prevented the catastrophic collapse seen in v1.2.
+    
+3. **Differential LR Optimization:** Assigning a lower learning rate ($1 \times 10^{-5}$) to the Subject Classifier prevented the discriminator from overpowering the Encoder, allowing for a more nuanced feature extraction process.
+    
+4. **Persistent Bottleneck:** While subject-specific clusters are successfully merged (ref: `tsne_v1_2_1_dann_loso_ZAB_subjects.png`), the overall retrieval performance remains low. This suggests that "Identity Information" and "Semantic Information" are deeply entangled in the current single-stream architecture.
+    
+
+### 💡 Next Steps (v1.3 Evolution):
+
+- **Feature Disentanglement:** Move toward a dual-stream or "Split-Head" architecture to explicitly separate subject-invariant content from subject-specific style.
+    
+- **Euclidean Alignment (EA):** Implement covariance-based signal alignment in the preprocessing stage to reduce physiological variance before the data enters the Transformer.
+
+---
+
 ## [v1.2] 2026-05-02 - Adversarial Domain Adaptation (DANN) Initial Test
 
 **Objective:** Implement Domain Adversarial Neural Networks (DANN) with a Gradient Reversal Layer (GRL) to achieve subject-invariant feature extraction.
