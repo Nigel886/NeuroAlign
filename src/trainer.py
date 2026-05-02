@@ -48,8 +48,9 @@ def _build_subject_mapping(dataloader):
     subject_ids = sorted({sid for sid in subject_ids if sid != "UNK"})
     return {sid: i for i, sid in enumerate(subject_ids)}
 
-def _linear_warmup_to_one(progress):
-    return float(max(0.0, min(1.0, progress)))
+def _dann_lambda(progress):
+    p = float(max(0.0, min(1.0, progress)))
+    return float(2.0 / (1.0 + math.exp(-10.0 * p)) - 1.0)
 
 def train_one_epoch(
     model,
@@ -60,6 +61,7 @@ def train_one_epoch(
     device,
     epoch=1,
     total_epochs=1,
+    warmup_epochs=5,
     accumulation_steps=4,
 ):
     model.train()
@@ -98,8 +100,12 @@ def train_one_epoch(
             text_features = torch.sum(last_hidden_state * text_mask, dim=1) / torch.sum(text_mask, dim=1).clamp(min=1e-9)
         
         denom = max(1, total_epochs * len(dataloader))
-        progress = ((epoch - 1) * len(dataloader) + step) / denom
-        lambda_subject = _linear_warmup_to_one(progress)
+        current_step = (epoch - 1) * len(dataloader) + step
+        progress = current_step / denom
+        if epoch <= warmup_epochs:
+            lambda_subject = 0.0
+        else:
+            lambda_subject = _dann_lambda(progress)
 
         subject_ids = batch.get("subject_ids", None)
         batch_subject_labels = batch.get("subject_labels", None)
