@@ -3,6 +3,26 @@
 This document tracks the iterative development of the NeuroAlign framework, focusing on the alignment between EEG signals and LLM semantic embeddings.
 
 ---
+## [v1.1] 2026-05-02 - The Reality Check: LOSO Validation
+
+**Objective:** Evaluate cross-subject generalization using Leave-One-Subject-Out (LOSO) on ZAB.
+
+### 📊 Performance Metrics (The Generalization Gap):
+
+|**Metric**|**Seen Subjects**|**Unseen (ZAB)**|
+|---|---|---|
+|**Top-1 Accuracy**|8.95%|**0.00%**|
+|**Top-5 Accuracy**|47.90%|**0.13%**|
+
+### 🔍 Technical Post-mortem:
+
+1. **Subject Incompatibility:** The model failed to translate semantic alignment logic from the training pool (ZPH, ZMG, etc.) to the target subject (ZAB). This confirms the high sensitivity of EEG-to-LLM alignment to individual neural signatures.
+    
+2. **Manifold Overlap:** t-SNE visualization shows good inter-subject overlap among EEG embeddings, but a persistent **Modality Gap** remains. The "alignment" achieved is purely physiological, not semantic.
+    
+3. **Baseline Correction:** v1.0's 83% was identified as "subject-specific overfitting." The current 0% represents the true challenge of subject-independent neural decoding.
+
+---
 
 ## [v1.0] 2026-05-01 - Milestone: High-Fidelity Semantic Alignment
 **Objective:** Finalize the core alignment architecture using nonlinear projection and hypersphere constraints.
