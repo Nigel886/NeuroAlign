@@ -4,24 +4,15 @@ import torch.nn.functional as F
 import math
 from transformers import AutoModelForCausalLM, BitsAndBytesConfig
 
-class _GradientReversalFn(torch.autograd.Function):
+class ReverseLayerF(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, x, lambda_):
-        ctx.lambda_ = float(lambda_)
+    def forward(ctx, x, alpha):
+        ctx.alpha = float(alpha)
         return x.view_as(x)
 
     @staticmethod
     def backward(ctx, grad_output):
-        return -ctx.lambda_ * grad_output, None
-
-class GradientReversalLayer(nn.Module):
-    def __init__(self, lambda_=1.0):
-        super().__init__()
-        self.lambda_ = float(lambda_)
-
-    def forward(self, x, lambda_=None):
-        lam = self.lambda_ if lambda_ is None else float(lambda_)
-        return _GradientReversalFn.apply(x, lam)
+        return -ctx.alpha * grad_output, None
 
 class PositionalEncoding(nn.Module):
     def __init__(self, d_model, dropout=0.1, max_len=5000):
@@ -51,6 +42,7 @@ class EEGTransformerEncoder(nn.Module):
         dropout=0.1,
         output_dim=4096,
         num_subjects=None,
+        subject_hidden_dim=256,
     ):
         super(EEGTransformerEncoder, self).__init__()
         
@@ -77,9 +69,14 @@ class EEGTransformerEncoder(nn.Module):
             nn.Linear(2048, output_dim)
         )
 
-        self.grl = GradientReversalLayer(lambda_=1.0)
         self.subject_classifier = (
-            nn.Linear(d_model, int(num_subjects)) if num_subjects is not None else None
+            nn.Sequential(
+                nn.Linear(d_model, int(subject_hidden_dim)),
+                nn.ReLU(),
+                nn.Linear(int(subject_hidden_dim), int(num_subjects)),
+            )
+            if num_subjects is not None
+            else None
         )
         
         self.d_model = d_model
@@ -96,10 +93,12 @@ class EEGTransformerEncoder(nn.Module):
                 nn.init.xavier_uniform_(m.weight)
                 nn.init.constant_(m.bias, 0)
         if self.subject_classifier is not None:
-            nn.init.xavier_uniform_(self.subject_classifier.weight)
-            nn.init.constant_(self.subject_classifier.bias, 0)
+            for m in self.subject_classifier:
+                if isinstance(m, nn.Linear):
+                    nn.init.xavier_uniform_(m.weight)
+                    nn.init.constant_(m.bias, 0)
 
-    def forward(self, src, src_key_padding_mask=None, return_subject_logits=False, grl_lambda=1.0):
+    def forward(self, src, src_key_padding_mask=None, return_subject_logits=False, grl_alpha=1.0):
         """
         src: (batch_size, seq_len, input_dim)
         src_key_padding_mask: (batch_size, seq_len)
@@ -129,7 +128,7 @@ class EEGTransformerEncoder(nn.Module):
         if return_subject_logits:
             if self.subject_classifier is None:
                 raise ValueError("Subject classifier is not enabled. Set num_subjects when constructing the model.")
-            rev = self.grl(pooled_output, lambda_=grl_lambda)
+            rev = ReverseLayerF.apply(pooled_output, grl_alpha)
             subject_logits = self.subject_classifier(rev)
             return aligned_output, subject_logits
 
