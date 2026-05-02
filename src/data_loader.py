@@ -120,6 +120,9 @@ class ZuCoDataset(Dataset):
         else:
             self.data = [it for it in raw_items if it["subject_id"] == test_subject]
 
+        subjects = sorted({str(it["subject_id"]).upper() for it in self.data if it.get("subject_id") not in (None, "UNK")})
+        self.subject_to_idx = {sid: i for i, sid in enumerate(subjects)}
+
         self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name_or_path)
         
         # Llama-3 等模型需要手动设置 pad_token
@@ -151,6 +154,7 @@ class ZuCoDataset(Dataset):
             mean, std = self.subject_stats[item["subject_id"]]
             eeg_np = (eeg_np - mean) / std
         eeg_features = torch.from_numpy(eeg_np)
+        subject_label = self.subject_to_idx.get(str(item["subject_id"]).upper(), -1)
         
         return {
             'input_ids': torch.tensor(encoding['input_ids'], dtype=torch.long),
@@ -158,6 +162,7 @@ class ZuCoDataset(Dataset):
             'eeg': eeg_features,
             'text': text,
             'subject_id': item["subject_id"],
+            'subject_label': torch.tensor(subject_label, dtype=torch.long),
         }
 
 def zuco_collate_fn(batch, pad_token_id):
@@ -167,6 +172,7 @@ def zuco_collate_fn(batch, pad_token_id):
     input_ids = [item['input_ids'] for item in batch]
     attention_masks = [item['attention_mask'] for item in batch]
     eegs = [item['eeg'] for item in batch]
+    subject_labels = [item.get('subject_label') for item in batch]
     
     # 对 input_ids 进行 Padding (文本)
     input_ids_padded = torch.nn.utils.rnn.pad_sequence(
@@ -198,6 +204,7 @@ def zuco_collate_fn(batch, pad_token_id):
         'eeg_mask': eeg_masks,
         'texts': [item['text'] for item in batch],
         'subject_ids': [item.get('subject_id') for item in batch],
+        'subject_labels': torch.stack(subject_labels) if all(x is not None for x in subject_labels) else None,
     }
 
 def get_dataloader(
