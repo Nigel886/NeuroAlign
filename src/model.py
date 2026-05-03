@@ -35,6 +35,7 @@ class CenteringLayer(nn.Module):
     def __init__(self, dim):
         super().__init__()
         self.register_buffer("delta", torch.zeros(int(dim), dtype=torch.float32))
+        self.scaling_factor = 0.1
 
     @torch.no_grad()
     def set_delta(self, delta):
@@ -54,7 +55,7 @@ class CenteringLayer(nn.Module):
             if d.dim() != 1:
                 d = d.view(-1)
             d = d.to(device=x.device, dtype=x.dtype)
-        return x + d
+        return x + d * self.scaling_factor
 
 class EEGTransformerEncoder(nn.Module):
     def __init__(
@@ -112,9 +113,21 @@ class EEGTransformerEncoder(nn.Module):
             if num_subjects is not None
             else None
         )
+        if self.subject_classifier is not None:
+            self.register_buffer("subject_grad_norm", torch.zeros(1, dtype=torch.float32))
+            self.subject_classifier.register_full_backward_hook(self._subject_backward_hook)
         
         self.d_model = d_model
         self._init_weights()
+
+    def _subject_backward_hook(self, module, grad_input, grad_output):
+        if not grad_output:
+            return
+        g = grad_output[0]
+        if not torch.is_tensor(g):
+            return
+        with torch.no_grad():
+            self.subject_grad_norm.fill_(g.detach().to(dtype=torch.float32).norm())
 
     def _init_weights(self):
         initrange = 0.1
