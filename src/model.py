@@ -35,7 +35,7 @@ class CenteringLayer(nn.Module):
     def __init__(self, dim):
         super().__init__()
         self.register_buffer("delta", torch.zeros(int(dim), dtype=torch.float32))
-        self.scaling_factor = 0.1
+        self.scaling_factor = 1.0
 
     @torch.no_grad()
     def set_delta(self, delta):

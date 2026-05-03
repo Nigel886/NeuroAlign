@@ -218,15 +218,14 @@ def train_one_epoch(
                 delta = model.centroid_tracker.delta().to(device=device, dtype=eeg_features.dtype)
                 if use_centering and hasattr(model, "set_centering_delta"):
                     model.set_centering_delta(delta)
-                eeg_shifted = eeg_features + delta
                 if subject_logits.size(-1) != len(subject_to_idx):
                     raise ValueError(
                         f"subject_logits dim={subject_logits.size(-1)} but num_subjects={len(subject_to_idx)}. "
                         "Construct model with num_subjects matching the training subjects."
                     )
                 text_bank = torch.cat([text_features, model.memory_bank.queue.detach().to(device=device, dtype=text_features.dtype)], dim=0)
-                labels = torch.arange(eeg_shifted.size(0), device=device)
-                alignment_loss = criterion.forward_eeg_to_text_bank(eeg_shifted, text_bank, labels=labels) * alignment_weight
+                labels = torch.arange(eeg_features.size(0), device=device)
+                alignment_loss = criterion.forward_eeg_to_text_bank(eeg_features, text_bank, labels=labels) * alignment_weight
                 total_align += float(alignment_loss.detach().item())
                 subject_loss = ce_loss(subject_logits, subject_labels) * subject_weight
                 content_norm = F.normalize(content_features, p=2, dim=-1)
@@ -242,10 +241,9 @@ def train_one_epoch(
                 delta = model.centroid_tracker.delta().to(device=device, dtype=eeg_features.dtype)
                 if use_centering and hasattr(model, "set_centering_delta"):
                     model.set_centering_delta(delta)
-                eeg_shifted = eeg_features + delta
                 text_bank = torch.cat([text_features, model.memory_bank.queue.detach().to(device=device, dtype=text_features.dtype)], dim=0)
-                labels = torch.arange(eeg_shifted.size(0), device=device)
-                alignment_loss = criterion.forward_eeg_to_text_bank(eeg_shifted, text_bank, labels=labels) * alignment_weight
+                labels = torch.arange(eeg_features.size(0), device=device)
+                alignment_loss = criterion.forward_eeg_to_text_bank(eeg_features, text_bank, labels=labels) * alignment_weight
                 total_align += float(alignment_loss.detach().item())
                 subject_loss = None
                 ortho_loss = None
@@ -258,6 +256,8 @@ def train_one_epoch(
         
         # 4. 梯度累积更新
         if (step + 1) % accumulation_steps == 0:
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             scaler.step(optimizer)
             scaler.update()
             optimizer.zero_grad()
