@@ -10,6 +10,7 @@ import os
 import argparse
 import json
 import datetime
+import re
 
 class _CentroidTracker(torch.nn.Module):
     def __init__(self, dim):
@@ -229,17 +230,39 @@ def _safe_name(s: str) -> str:
         out = out.replace("__", "_")
     return out.strip("._")
 
+def _infer_version_tag_from_checkpoint_path(checkpoint_path: str):
+    if not checkpoint_path:
+        return None
+    base = os.path.basename(str(checkpoint_path))
+    m = re.search(r"(v\d+(?:[._]\d+){0,3})", base, flags=re.IGNORECASE)
+    if not m:
+        return None
+    v = m.group(1).lower().replace(".", "_")
+    return _safe_name(v)
+
+def _has_version_tag(s: str) -> bool:
+    if not s:
+        return False
+    return re.search(r"v\d+", str(s), flags=re.IGNORECASE) is not None
+
 def _make_output_dir(out_dir, output_prefix, test_subject_id, checkpoint_path):
     if out_dir:
         base = out_dir
     else:
-        date_str = datetime.date.today().isoformat()
-        ckpt = os.path.splitext(os.path.basename(checkpoint_path))[0] if checkpoint_path else "no_ckpt"
-        parts = [date_str, ckpt]
-        if test_subject_id:
-            parts.append(f"LOSO_{str(test_subject_id).upper()}")
-        if output_prefix and output_prefix != "tsne":
-            parts.append(str(output_prefix))
+        date_str = datetime.date.today().strftime("%Y%m%d")
+        tag = str(output_prefix) if output_prefix else "eval"
+        if tag.lower().startswith("tsne_"):
+            tag = tag[5:]
+        if tag == "tsne":
+            tag = "eval"
+        if not _has_version_tag(tag):
+            ckpt_v = _infer_version_tag_from_checkpoint_path(checkpoint_path)
+            if ckpt_v:
+                tag = ckpt_v if tag == "eval" else f"{tag}_{ckpt_v}"
+        parts = [date_str, tag]
+        test_subject = str(test_subject_id).upper() if test_subject_id else None
+        if test_subject and test_subject not in tag.upper():
+            parts.append(f"LOSO_{test_subject}")
         run_name = _safe_name("_".join(parts))
         base = os.path.join("outputs", run_name)
 
@@ -305,6 +328,7 @@ def main():
     )
     metrics_payload = {
         "checkpoint": os.path.abspath(args.checkpoint),
+        "checkpoint_version": _infer_version_tag_from_checkpoint_path(args.checkpoint),
         "data_path": os.path.abspath(args.data_path),
         "llm_name": args.llm_name,
         "tokenizer_name": args.tokenizer_name,

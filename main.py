@@ -97,6 +97,10 @@ def main(args):
     # 6. 训练循环
     print(f"\nStarting NeuroAlign Training for {args.epochs} epochs...")
     print(f"Gradient Accumulation Steps: {args.grad_accum}")
+
+    checkpoint_root = os.path.join("checkpoints", str(args.version_tag))
+    os.makedirs(checkpoint_root, exist_ok=True)
+    print(f"Checkpoints will be saved to: {os.path.abspath(checkpoint_root)}")
     
     best_loss = float('inf')
     best_align = float("inf")
@@ -119,7 +123,7 @@ def main(args):
         print(f"Epoch {epoch}/{args.epochs} - Total Loss: {epoch_loss:.4f} | Align Loss: {epoch_align:.4f}")
 
         if args.loso_test_subject is not None:
-            version_tag = "v1_4" if args.use_centering else "v1_3"
+            version_tag = str(args.version_tag)
             subj = args.loso_test_subject.upper()
             parts = ["eeg_encoder", version_tag]
             if args.enable_dann:
@@ -127,7 +131,7 @@ def main(args):
             parts.append(f"loso_{subj}")
             base_name = "_".join(parts)
             print(f"Run tag: {base_name}")
-            latest_path = os.path.join("checkpoints", f"{base_name}_latest.pth")
+            latest_path = os.path.join(checkpoint_root, f"{base_name}_latest.pth")
             if args.use_centering and getattr(model, "centroid_tracker", None) is not None and hasattr(model, "set_centering_delta"):
                 model.set_centering_delta(model.centroid_tracker.delta())
             torch.save(model.state_dict(), latest_path)
@@ -135,20 +139,20 @@ def main(args):
 
             if epoch_align < best_align:
                 best_align = epoch_align
-                best_path = os.path.join("checkpoints", f"{base_name}_best.pth")
+                best_path = os.path.join(checkpoint_root, f"{base_name}_best.pth")
                 torch.save(model.state_dict(), best_path)
                 print(f"Checkpoint saved: {best_path}")
                 print(f"New best model saved with align loss: {best_align:.4f}")
 
             if epoch in {15, 20, 25, 30}:
-                snap_path = os.path.join("checkpoints", f"{base_name}_epoch{epoch:02d}.pth")
+                snap_path = os.path.join(checkpoint_root, f"{base_name}_epoch{epoch:02d}.pth")
                 torch.save(model.state_dict(), snap_path)
                 print(f"Checkpoint saved: {snap_path}")
         else:
-            save_checkpoint(model, "latest")
+            save_checkpoint(model, "latest", path=checkpoint_root)
             if epoch_align < best_align:
                 best_align = epoch_align
-                save_checkpoint(model, "best")
+                save_checkpoint(model, "best", path=checkpoint_root)
                 print(f"New best model saved with align loss: {best_align:.4f}")
 
     print("\nTraining completed successfully!")
@@ -176,6 +180,7 @@ if __name__ == "__main__":
     parser.add_argument("--no_centering", dest="use_centering", action="store_false", help="Disable v1.4 centering delta in AlignmentHead")
     parser.set_defaults(use_centering=True)
     parser.add_argument("--centering_momentum", type=float, default=0.9, help="EMA momentum for centroid tracking (v1.4)")
+    parser.add_argument("--version_tag", type=str, default="v1_5", help="Version tag used to group checkpoints (e.g., v1_5, v1_6)")
     
     args = parser.parse_args()
     
