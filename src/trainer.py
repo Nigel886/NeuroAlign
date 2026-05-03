@@ -58,6 +58,46 @@ class ContrastiveLoss(nn.Module):
         
         return (loss_eeg + loss_text) / 2
 
+    def forward_eeg_to_text_bank(self, eeg_features, text_bank, labels=None):
+        eeg_features = F.normalize(eeg_features, p=2, dim=-1)
+        text_bank = F.normalize(text_bank, p=2, dim=-1)
+        logits = torch.matmul(eeg_features, text_bank.t()) * self.logit_scale.exp()
+        if labels is None:
+            labels = torch.arange(eeg_features.size(0), device=eeg_features.device)
+        return F.cross_entropy(logits, labels)
+
+
+class MemoryBank(nn.Module):
+    def __init__(self, queue_size=1024, dim=4096):
+        super().__init__()
+        self.queue_size = int(queue_size)
+        self.dim = int(dim)
+        self.register_buffer("queue", F.normalize(torch.randn(self.queue_size, self.dim, dtype=torch.float32), p=2, dim=-1))
+        self.register_buffer("queue_ptr", torch.zeros(1, dtype=torch.long))
+
+    @torch.no_grad()
+    def enqueue(self, keys):
+        keys = keys.detach()
+        keys = F.normalize(keys.to(dtype=torch.float32), p=2, dim=-1)
+        batch_size = int(keys.size(0))
+        if batch_size <= 0:
+            return
+
+        ptr = int(self.queue_ptr.item())
+        if batch_size >= self.queue_size:
+            self.queue.copy_(keys[-self.queue_size :].to(device=self.queue.device))
+            self.queue_ptr.fill_(0)
+            return
+
+        end = ptr + batch_size
+        if end <= self.queue_size:
+            self.queue[ptr:end].copy_(keys.to(device=self.queue.device))
+        else:
+            first = self.queue_size - ptr
+            self.queue[ptr:].copy_(keys[:first].to(device=self.queue.device))
+            self.queue[: end - self.queue_size].copy_(keys[first:].to(device=self.queue.device))
+        self.queue_ptr.fill_(end % self.queue_size)
+
 def _build_subject_mapping(dataloader):
     dataset = getattr(dataloader, "dataset", None)
     subject_to_idx = getattr(dataset, "subject_to_idx", None) if dataset is not None else None
@@ -96,7 +136,8 @@ def train_one_epoch(
     total_align = 0
     optimizer.zero_grad()
 
-    alignment_weight = 1.5
+    alignment_weight = 5.0
+    subject_weight = 0.5
     gamma_ortho = 0.1
     centroid_momentum = float(centering_momentum)
     criterion = ContrastiveLoss().to(device)
@@ -107,6 +148,8 @@ def train_one_epoch(
 
     ce_loss = nn.CrossEntropyLoss(ignore_index=-1).to(device)
     subject_to_idx = _build_subject_mapping(dataloader)
+    if getattr(model, "memory_bank", None) is None:
+        model.memory_bank = MemoryBank(queue_size=1024, dim=int(getattr(llm.config, "hidden_size", 4096))).to(device)
     
     pbar = tqdm(dataloader, desc="Training")
     for step, batch in enumerate(pbar):
@@ -181,9 +224,11 @@ def train_one_epoch(
                         f"subject_logits dim={subject_logits.size(-1)} but num_subjects={len(subject_to_idx)}. "
                         "Construct model with num_subjects matching the training subjects."
                     )
-                alignment_loss = criterion(eeg_shifted, text_features) * alignment_weight
+                text_bank = torch.cat([text_features, model.memory_bank.queue.detach().to(device=device, dtype=text_features.dtype)], dim=0)
+                labels = torch.arange(eeg_shifted.size(0), device=device)
+                alignment_loss = criterion.forward_eeg_to_text_bank(eeg_shifted, text_bank, labels=labels) * alignment_weight
                 total_align += float(alignment_loss.detach().item())
-                subject_loss = ce_loss(subject_logits, subject_labels)
+                subject_loss = ce_loss(subject_logits, subject_labels) * subject_weight
                 content_norm = F.normalize(content_features, p=2, dim=-1)
                 style_norm = F.normalize(style_features, p=2, dim=-1)
                 cross = torch.matmul(content_norm.transpose(0, 1), style_norm) / float(content_norm.size(0))
@@ -198,7 +243,9 @@ def train_one_epoch(
                 if use_centering and hasattr(model, "set_centering_delta"):
                     model.set_centering_delta(delta)
                 eeg_shifted = eeg_features + delta
-                alignment_loss = criterion(eeg_shifted, text_features) * alignment_weight
+                text_bank = torch.cat([text_features, model.memory_bank.queue.detach().to(device=device, dtype=text_features.dtype)], dim=0)
+                labels = torch.arange(eeg_shifted.size(0), device=device)
+                alignment_loss = criterion.forward_eeg_to_text_bank(eeg_shifted, text_bank, labels=labels) * alignment_weight
                 total_align += float(alignment_loss.detach().item())
                 subject_loss = None
                 ortho_loss = None
@@ -216,6 +263,7 @@ def train_one_epoch(
             optimizer.zero_grad()
             
         total_loss += loss.item() * accumulation_steps
+        model.memory_bank.enqueue(text_features)
         postfix = {
             "loss": loss.item() * accumulation_steps,
             "lambda": float(lambda_subject),
