@@ -4,6 +4,27 @@ This document tracks the iterative development of the NeuroAlign framework, focu
 
 ---
 
+## [v1.4] 2026-05-03 - Cross-Modal Centering: The Geometric Collapse
+
+**Objective:** Bridge the Modality Gap between EEG and Text clusters via EMA-based global centroid shifting and bias correction.
+
+### 📊 Performance Metrics (The Great Regression):
+
+| **Metric** | **v1.3 (Disentangled)** | **v1.4 (Centering)** | **Trend** |
+| :--- | :--- | :--- | :--- |
+| **Seen Top-1 Accuracy** | 2.10% | **0.06%** | 📉 Semantic Collapse |
+| **Unseen Top-1 (ZAB)** | 0.13% | **0.00%** | 📉 Total Failure |
+| **Align Loss (End)** | ~1.10 | **1.18** | ➡️ Plateau at 1.18 |
+| **Total Loss (End)** | ~7.50 | **6.19** | ✅ Structural Convergence |
+| **Manifold Shape** | Gaussian Cloud | **Snake-like Strings** | ❌ Geometric Distortion |
+
+### 🔍 Technical Post-mortem:
+1. **Adversarial Overload:** The subject classifier's gradients (Subject Loss ~10.0) dominated the training process. The Gradient Reversal Layer (GRL) forced the encoder to learn non-semantic, 'snake-like' geometric features to bypass subject identification, effectively 'erasing' semantic discriminability.
+2. **Contrastive Starvation:** With an effective batch size of 8 (batch_size=2, grad_accum=4), the InfoNCE loss lacked sufficient negative samples to generate a strong alignment gradient. This resulted in a stagnant Align Loss of 1.18.
+3. **Centering Paradox:** While the global centroids shifted, the underlying manifold topology was too distorted for the linear translation to enable successful retrieval.
+
+---
+
 ## [v1.3] 2026-05-02 - Feature Disentanglement: Recovery of Semantic Utility
 
 **Objective:** Implement a "Split-Head" architecture to decouple semantic intent (Content) from subject identity (Style), and introduce Euclidean Alignment (EA) for raw signal calibration.
