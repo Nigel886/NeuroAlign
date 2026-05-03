@@ -118,6 +118,8 @@ def main(args):
             accumulation_steps=args.grad_accum,
             use_centering=args.use_centering,
             centering_momentum=args.centering_momentum,
+            temperature=args.temperature,
+            margin=args.margin,
         )
         
         print(f"Epoch {epoch}/{args.epochs} - Total Loss: {epoch_loss:.4f} | Align Loss: {epoch_align:.4f}")
@@ -181,6 +183,8 @@ if __name__ == "__main__":
     parser.set_defaults(use_centering=True)
     parser.add_argument("--centering_momentum", type=float, default=0.9, help="EMA momentum for centroid tracking (v1.4)")
     parser.add_argument("--version_tag", type=str, default="v1_5", help="Version tag used to group checkpoints (e.g., v1_5, v1_6)")
+    parser.add_argument("--temperature", type=float, default=0.07, help="Initial temperature for contrastive loss (trainable logit_scale)")
+    parser.add_argument("--margin", type=float, default=0.2, help="Similarity margin for InfoNCE positive pairs")
     
     args = parser.parse_args()
     

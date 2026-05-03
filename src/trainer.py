@@ -32,7 +32,7 @@ class CentroidTracker(nn.Module):
         return self.text_centroid - self.eeg_centroid
 
 class ContrastiveLoss(nn.Module):
-    def __init__(self, temperature=0.05, margin=0.0):
+    def __init__(self, temperature=0.07, margin=0.0):
         super(ContrastiveLoss, self).__init__()
         self.logit_scale = nn.Parameter(torch.tensor(math.log(1 / temperature), dtype=torch.float32))
         self.margin = float(margin)
@@ -143,17 +143,19 @@ def train_one_epoch(
     accumulation_steps=4,
     use_centering=True,
     centering_momentum=0.9,
+    temperature=0.07,
+    margin=0.2,
 ):
     model.train()
     total_loss = 0
     total_align = 0
     optimizer.zero_grad()
 
-    alignment_weight = 5.0
+    alignment_weight = 15.0
     subject_weight = 0.5
-    gamma_ortho = 0.1
+    gamma_ortho = 0.5
     centroid_momentum = float(centering_momentum)
-    criterion = ContrastiveLoss(margin=0.1).to(device)
+    criterion = ContrastiveLoss(temperature=float(temperature), margin=float(margin)).to(device)
     existing_params = {id(p) for group in optimizer.param_groups for p in group["params"]}
     new_params = [p for p in criterion.parameters() if id(p) not in existing_params]
     if new_params:
@@ -191,8 +193,10 @@ def train_one_epoch(
         progress = current_step / denom
         if epoch <= warmup_epochs:
             lambda_subject = 0.0
+            gamma_ortho_eff = 0.0
         else:
             lambda_subject = _dann_lambda(progress)
+            gamma_ortho_eff = gamma_ortho
 
         subject_ids = batch.get("subject_ids", None)
         batch_subject_labels = batch.get("subject_labels", None)
@@ -269,7 +273,7 @@ def train_one_epoch(
                 style_norm = F.normalize(style_features, p=2, dim=-1)
                 cross = torch.matmul(content_norm.transpose(0, 1), style_norm) / float(content_norm.size(0))
                 ortho_loss = torch.mean(cross ** 2)
-                loss = alignment_loss + lambda_subject * subject_loss + gamma_ortho * ortho_loss
+                loss = alignment_loss + lambda_subject * subject_loss + gamma_ortho_eff * ortho_loss
             else:
                 eeg_features = model(eeg, src_key_padding_mask=src_key_padding_mask)
                 if getattr(model, "centroid_tracker", None) is None:

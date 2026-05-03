@@ -4,6 +4,30 @@ This document tracks the iterative development of the NeuroAlign framework, focu
 
 ---
 
+## [v1.6] 2026-05-03 - Project NeuroAlign: LOSO & Adversarial Bottleneck
+
+**Objective:** Implement Leave-One-Subject-Out (LOSO) training and evaluate cross-subject generalization using Subject-Adversarial (DANN) logic.
+
+### 📊 Performance Metrics (The Generalization Challenge):
+
+|**Metric**|**v1.5 (Seen Master)**|**v1.6 (LOSO Attempt)**|**Trend**|
+|---|---|---|---|
+|**Seen Top-1 Accuracy**|9.30%|**8.76%**|📉 Minor Trade-off|
+|**Seen Top-5 Accuracy**|49.71%|**49.49%**|➡️ Highly Stable|
+|**Unseen Top-1 (ZAB)**|0.00%|**0.00%**|⛔ Zero-Shot Wall|
+|**Unseen Top-5 (ZAB)**|0.38%|**0.00%**|📉 Regression|
+|**Modality Alignment**|Overlapping (Seen)|**Fragmented (Unseen)**|⚠️ Modality Gap|
+
+### 🔍 Technical Post-mortem:
+
+1. **Adversarial Interference:** The introduction of the DANN head with `lambda_subject` scheduling aimed to erase subject identity. However, the resulting gradient noise caused a slight drop in primary alignment accuracy (Seen Top-1 dropped by 0.54%).
+    
+2. **The Modality Gap:** t-SNE visualization confirms that while Seen Subjects cluster near the text manifold, the Unseen Subject (ZAB) remains trapped in a separate manifold region. The "Modality Gap" is currently the primary blocker for zero-shot retrieval.
+    
+3. **Batch Size Constraint:** With an effective batch size of only 16, the contrastive loss (InfoNCE) lacks the negative sample density required to distinguish subtle semantic differences across different human brain patterns.
+
+---
+
 ## [v1.5] 2026-05-03 - Project Medusa: Manifold Restoration & Seen Breakthrough
 
 **Objective:** Rectify geometric collapse via gradient clipping and expand contrastive density using a Momentum Memory Bank.

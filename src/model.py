@@ -137,7 +137,7 @@ class EEGTransformerEncoder(nn.Module):
         # 对 Alignment Head 进行初始化
         for m in self.alignment_head:
             if isinstance(m, nn.Linear):
-                nn.init.xavier_uniform_(m.weight)
+                nn.init.xavier_normal_(m.weight)
                 nn.init.constant_(m.bias, 0)
         if self.subject_classifier is not None:
             for m in self.subject_classifier:
