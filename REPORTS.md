@@ -4,6 +4,27 @@ This document tracks the iterative development of the NeuroAlign framework, focu
 
 ---
 
+## [v1.5] 2026-05-03 - Project Medusa: Manifold Restoration & Seen Breakthrough
+
+**Objective:** Rectify geometric collapse via gradient clipping and expand contrastive density using a Momentum Memory Bank.
+
+### 📊 Performance Metrics (The Medusa Victory):
+
+| **Metric** | **v1.4 (Collapsed)** | **v1.5 (Medusa)** | **Trend** |
+| :--- | :--- | :--- | :--- |
+| **Seen Top-1 Accuracy** | 0.06% | **9.30%** | 🚀 Structural Leap |
+| **Seen Top-5 Accuracy** | 0.22% | **49.71%** | 🚀 Major Milestone |
+| **Unseen Top-1 (ZAB)** | 0.00% | **0.00%** | ➡️ Generalization Bottleneck |
+| **Unseen Top-5 (ZAB)** | 0.26% | **0.38%** | 📈 Slight Gain |
+| **Manifold Shape** | Snake-like Filaments | **Healthy Gaussian Clouds** | ✅ Geometry Restored |
+
+### 🔍 Technical Post-mortem:
+1. **Geometric Recovery:** By enforcing `max_norm=1.0` gradient clipping and fixing the pre-normalization centering logic, the 'snake' manifold pathology was eliminated. Embeddings now occupy a high-dimensional Gaussian space compatible with LLM semantics.
+2. **Contrastive Density:** The 1024-capacity `MemoryBank` provided the necessary negative sample pressure for the InfoNCE loss to converge. The alignment head (weighted at 5.0) successfully mapped EEG signals into the LLM manifold for trained subjects.
+3. **The Unseen Frontier:** While seen subject performance reached record highs, the unseen subject (ZAB) remains trapped in a 'Subject-Anchor' state, where embeddings cluster tightly but fail to disperse across semantic labels.
+
+---
+
 ## [v1.4] 2026-05-03 - Cross-Modal Centering: The Geometric Collapse
 
 **Objective:** Bridge the Modality Gap between EEG and Text clusters via EMA-based global centroid shifting and bias correction.
