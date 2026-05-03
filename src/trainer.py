@@ -32,9 +32,10 @@ class CentroidTracker(nn.Module):
         return self.text_centroid - self.eeg_centroid
 
 class ContrastiveLoss(nn.Module):
-    def __init__(self, temperature=0.05):
+    def __init__(self, temperature=0.05, margin=0.0):
         super(ContrastiveLoss, self).__init__()
         self.logit_scale = nn.Parameter(torch.tensor(math.log(1 / temperature), dtype=torch.float32))
+        self.margin = float(margin)
 
     def forward(self, eeg_features, text_features):
         """
@@ -47,7 +48,13 @@ class ContrastiveLoss(nn.Module):
         text_features = F.normalize(text_features, p=2, dim=-1)
         
         # 计算相似度矩阵
-        logits_per_eeg = torch.matmul(eeg_features, text_features.t()) * self.logit_scale.exp()
+        scale = self.logit_scale.exp()
+        similarity = torch.matmul(eeg_features, text_features.t())
+        if self.margin != 0.0:
+            bsz = int(eeg_features.size(0))
+            idx = torch.arange(bsz, device=similarity.device)
+            similarity[idx, idx] = similarity[idx, idx] - self.margin
+        logits_per_eeg = similarity * scale
         logits_per_text = logits_per_eeg.t()
         
         # Ground truth: 对角线应该是最相似的
@@ -61,9 +68,15 @@ class ContrastiveLoss(nn.Module):
     def forward_eeg_to_text_bank(self, eeg_features, text_bank, labels=None):
         eeg_features = F.normalize(eeg_features, p=2, dim=-1)
         text_bank = F.normalize(text_bank, p=2, dim=-1)
-        logits = torch.matmul(eeg_features, text_bank.t()) * self.logit_scale.exp()
+        scale = self.logit_scale.exp()
+        similarity = torch.matmul(eeg_features, text_bank.t())
         if labels is None:
             labels = torch.arange(eeg_features.size(0), device=eeg_features.device)
+        if self.margin != 0.0:
+            bsz = int(eeg_features.size(0))
+            idx = torch.arange(bsz, device=similarity.device)
+            similarity[idx, labels] = similarity[idx, labels] - self.margin
+        logits = similarity * scale
         return F.cross_entropy(logits, labels)
 
 
@@ -140,7 +153,7 @@ def train_one_epoch(
     subject_weight = 0.5
     gamma_ortho = 0.1
     centroid_momentum = float(centering_momentum)
-    criterion = ContrastiveLoss().to(device)
+    criterion = ContrastiveLoss(margin=0.1).to(device)
     existing_params = {id(p) for group in optimizer.param_groups for p in group["params"]}
     new_params = [p for p in criterion.parameters() if id(p) not in existing_params]
     if new_params:
@@ -202,6 +215,16 @@ def train_one_epoch(
         else:
             subject_labels = None
 
+        def _centroid_perturb(delta, ratio=0.05):
+            if delta is None or not torch.is_tensor(delta):
+                return None
+            d = delta.detach().to(dtype=torch.float32)
+            std = float(d.std().item())
+            if not math.isfinite(std) or std <= 0.0:
+                return delta
+            noise = torch.randn_like(delta) * (float(ratio) * std)
+            return delta + noise
+
         # 2. 混合精度前向传播
         with autocast():
             if use_subject:
@@ -211,6 +234,8 @@ def train_one_epoch(
                     return_subject_logits=True,
                     return_decomposed_features=True,
                     grl_alpha=lambda_subject,
+                    aug_mode=True,
+                    subject_labels=subject_labels,
                 )
                 if getattr(model, "centroid_tracker", None) is None:
                     model.centroid_tracker = CentroidTracker(dim=int(text_features.size(-1)), momentum=centroid_momentum).to(device)
@@ -218,6 +243,18 @@ def train_one_epoch(
                 delta = model.centroid_tracker.delta().to(device=device, dtype=eeg_features.dtype)
                 if use_centering and hasattr(model, "set_centering_delta"):
                     model.set_centering_delta(delta)
+                delta_noisy = _centroid_perturb(delta, ratio=0.05) if use_centering else None
+                if use_centering and delta_noisy is not None:
+                    eeg_features, subject_logits, content_features, style_features = model(
+                        eeg,
+                        src_key_padding_mask=src_key_padding_mask,
+                        return_subject_logits=True,
+                        return_decomposed_features=True,
+                        grl_alpha=lambda_subject,
+                        centering_delta=delta_noisy,
+                        aug_mode=True,
+                        subject_labels=subject_labels,
+                    )
                 if subject_logits.size(-1) != len(subject_to_idx):
                     raise ValueError(
                         f"subject_logits dim={subject_logits.size(-1)} but num_subjects={len(subject_to_idx)}. "
@@ -241,6 +278,13 @@ def train_one_epoch(
                 delta = model.centroid_tracker.delta().to(device=device, dtype=eeg_features.dtype)
                 if use_centering and hasattr(model, "set_centering_delta"):
                     model.set_centering_delta(delta)
+                delta_noisy = _centroid_perturb(delta, ratio=0.05) if use_centering else None
+                if use_centering and delta_noisy is not None:
+                    eeg_features = model(
+                        eeg,
+                        src_key_padding_mask=src_key_padding_mask,
+                        centering_delta=delta_noisy,
+                    )
                 text_bank = torch.cat([text_features, model.memory_bank.queue.detach().to(device=device, dtype=text_features.dtype)], dim=0)
                 labels = torch.arange(eeg_features.size(0), device=device)
                 alignment_loss = criterion.forward_eeg_to_text_bank(eeg_features, text_bank, labels=labels) * alignment_weight

@@ -153,6 +153,8 @@ class EEGTransformerEncoder(nn.Module):
         return_decomposed_features=False,
         grl_alpha=1.0,
         centering_delta=None,
+        aug_mode=False,
+        subject_labels=None,
     ):
         """
         src: (batch_size, seq_len, input_dim)
@@ -178,6 +180,22 @@ class EEGTransformerEncoder(nn.Module):
             
         content_features = pooled_output[:, : self.content_dim]
         style_features = pooled_output[:, self.content_dim : self.content_dim + self.style_dim]
+        if aug_mode:
+            bsz = int(style_features.size(0))
+            if bsz > 1:
+                device = style_features.device
+                perm = torch.randperm(bsz, device=device)
+                if subject_labels is not None and torch.is_tensor(subject_labels) and int(subject_labels.numel()) == bsz:
+                    labels = subject_labels.to(device=device)
+                    for _ in range(5):
+                        same = labels == labels[perm]
+                        if not bool(same.any().item()):
+                            break
+                        perm2 = torch.randperm(bsz, device=device)
+                        perm = torch.where(same, perm2, perm)
+                other = style_features[perm]
+                lam = torch.rand(bsz, 1, device=device, dtype=style_features.dtype)
+                style_features = lam * style_features + (1.0 - lam) * other
 
         # 对齐映射 (384 -> 4096)
         aligned_output = self.alignment_head(content_features)
