@@ -4,6 +4,27 @@ This document tracks the iterative development of the NeuroAlign framework, focu
 
 ---
 
+## [v1.7] 2026-05-03 - Project Ghost: The Zero-Shot Breakthrough
+
+**Objective:** Overcome the domain-shift barrier for unseen subjects via stochastic centroid perturbation and domain smoothing.
+
+### 📊 Performance Metrics (The Generalization Pivot):
+
+| **Metric** | **v1.5 (Medusa)** | **v1.7 (Ghost Protocol)** | **Trend** |
+| :--- | :--- | :--- | :--- |
+| **Seen Top-1 Accuracy** | 9.30% | **8.28%** | 📉 Trade-off for Generalization |
+| **Seen Top-5 Accuracy** | 49.71% | **48.41%** | ➡️ Maintained Stability |
+| **Unseen Top-1 (ZAB)** | 0.00% | **0.26%** | 🚀 **BREAKTHROUGH** (Non-zero) |
+| **Unseen Top-5 (ZAB)** | 0.38% | **0.51%** | 📈 Incremental Gain |
+| **Manifold Shape** | Over-clustered | **Distributed/Robust** | ✅ Reduced Domain Bias |
+
+### 🔍 Technical Post-mortem:
+1. **The Ghost Protocol Effect:** The injection of centroid noise successfully forced the encoder to decouple semantic features from fixed subject coordinates. This resulted in the first successful Top-1 retrieval for an unseen domain (ZAB).
+2. **Distributional Smoothing:** t-SNE analysis shows that ZAB embeddings are no longer collapsed into a singular 'identity-heavy' kernel but are now expanding towards the LLM semantic anchors.
+3. **The Persistent Gap:** While generalization has begun, a systemic modality gap remains. ZAB's cluster is still primarily located in the negative-X quadrant relative to the Text manifold, suggesting a residual translation bias.
+
+---
+
 ## [v1.6] 2026-05-03 - Project NeuroAlign: LOSO & Adversarial Bottleneck
 
 **Objective:** Implement Leave-One-Subject-Out (LOSO) training and evaluate cross-subject generalization using Subject-Adversarial (DANN) logic.
