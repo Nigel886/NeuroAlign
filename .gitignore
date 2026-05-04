@@ -155,3 +155,6 @@ checkpoints/
 *.pth
 *.bin
 *.pt
+
+# TRAE skills
+.traerules

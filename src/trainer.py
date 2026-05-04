@@ -191,6 +191,9 @@ def train_one_epoch(
         denom = max(1, total_epochs * len(dataloader))
         current_step = (epoch - 1) * len(dataloader) + step
         progress = current_step / denom
+        tau_current = 0.05 - (0.05 - 0.02) * float(progress)
+        with torch.no_grad():
+            criterion.logit_scale.data.fill_(math.log(1.0 / float(tau_current)))
         if epoch <= warmup_epochs:
             lambda_subject = 0.0
             gamma_ortho_eff = 0.0
@@ -269,11 +272,12 @@ def train_one_epoch(
                 alignment_loss = criterion.forward_eeg_to_text_bank(eeg_features, text_bank, labels=labels) * alignment_weight
                 total_align += float(alignment_loss.detach().item())
                 subject_loss = ce_loss(subject_logits, subject_labels) * subject_weight
+                style_reg = torch.var(style_features.to(dtype=torch.float32), dim=0, unbiased=False).mean()
                 content_norm = F.normalize(content_features, p=2, dim=-1)
                 style_norm = F.normalize(style_features, p=2, dim=-1)
                 cross = torch.matmul(content_norm.transpose(0, 1), style_norm) / float(content_norm.size(0))
                 ortho_loss = torch.mean(cross ** 2)
-                loss = alignment_loss + lambda_subject * subject_loss + gamma_ortho_eff * ortho_loss
+                loss = alignment_loss + lambda_subject * subject_loss + gamma_ortho_eff * ortho_loss + 0.1 * style_reg
             else:
                 eeg_features = model(eeg, src_key_padding_mask=src_key_padding_mask)
                 if getattr(model, "centroid_tracker", None) is None:
@@ -321,6 +325,8 @@ def train_one_epoch(
             postfix["subj"] = float(subject_loss.detach().item())
         if ortho_loss is not None:
             postfix["ortho"] = float(ortho_loss.detach().item())
+        if "style_reg" in locals() and style_reg is not None:
+            postfix["style_reg"] = float(style_reg.detach().item())
         pbar.set_postfix(postfix)
         
     denom_batches = max(1, len(dataloader))

@@ -122,6 +122,30 @@ def run_retrieval_eval(model, llm, dataloader, device, test_subject_id=None):
     all_text_features = torch.cat(all_text_features, dim=0)
     all_eeg_features = F.normalize(all_eeg_features, p=2, dim=-1)
     all_text_features = F.normalize(all_text_features, p=2, dim=-1)
+
+    test_subject = str(test_subject_id).upper() if test_subject_id is not None else None
+    if test_subject and any(s is not None for s in all_subject_ids):
+        subj = np.array([str(s).upper() if s is not None else "UNK" for s in all_subject_ids], dtype=object)
+        unseen_mask = subj == test_subject
+        if unseen_mask.any():
+            eeg_centroid_test = all_eeg_features[unseen_mask].to(dtype=torch.float32).mean(dim=0)
+            text_centroid_test = all_text_features[unseen_mask].to(dtype=torch.float32).mean(dim=0)
+            delta_test = text_centroid_test - eeg_centroid_test
+            all_eeg_features[unseen_mask] = F.normalize(
+                all_eeg_features[unseen_mask].to(dtype=torch.float32) + delta_test,
+                p=2,
+                dim=-1,
+            ).to(dtype=all_eeg_features.dtype)
+        else:
+            eeg_centroid_test = all_eeg_features.to(dtype=torch.float32).mean(dim=0)
+            text_centroid_test = all_text_features.to(dtype=torch.float32).mean(dim=0)
+            delta_test = text_centroid_test - eeg_centroid_test
+            all_eeg_features = F.normalize(all_eeg_features.to(dtype=torch.float32) + delta_test, p=2, dim=-1).to(dtype=all_eeg_features.dtype)
+    else:
+        eeg_centroid_test = all_eeg_features.to(dtype=torch.float32).mean(dim=0)
+        text_centroid_test = all_text_features.to(dtype=torch.float32).mean(dim=0)
+        delta_test = text_centroid_test - eeg_centroid_test
+        all_eeg_features = F.normalize(all_eeg_features.to(dtype=torch.float32) + delta_test, p=2, dim=-1).to(dtype=all_eeg_features.dtype)
     
     # 计算相似度矩阵 (N, N)
     similarity = torch.matmul(all_eeg_features, all_text_features.t())
@@ -138,7 +162,6 @@ def run_retrieval_eval(model, llm, dataloader, device, test_subject_id=None):
         "top5_all": float(top5_all),
     }
 
-    test_subject = str(test_subject_id).upper() if test_subject_id is not None else None
     if test_subject and any(s is not None for s in all_subject_ids):
         subj = np.array([str(s).upper() if s is not None else "UNK" for s in all_subject_ids], dtype=object)
         unseen_mask = subj == test_subject

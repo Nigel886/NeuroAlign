@@ -75,7 +75,7 @@ class ZuCoDataset(Dataset):
 
         raw_items = []
         for p in resolved_pt_paths:
-            items = torch.load(p)
+            items = torch.load(p, weights_only=False)
             inferred = _infer_subject_id_from_path(p.name)
             for it in items:
                 subject_id = (
@@ -124,6 +124,12 @@ class ZuCoDataset(Dataset):
         self.subject_to_idx = {sid: i for i, sid in enumerate(subjects)}
 
         self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name_or_path)
+        
+        try:
+            self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name_or_path, local_files_only=False)
+        except Exception:
+            print("Warning: Network error. Ensure $env:HF_HUB_OFFLINE=1 is set.")
+            raise
         
         # Llama-3 等模型需要手动设置 pad_token
         if self.tokenizer.pad_token is None:
