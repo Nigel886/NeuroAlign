@@ -4,6 +4,27 @@ This document tracks the iterative development of the NeuroAlign framework, focu
 
 ---
 
+## [v1.8] 2026-05-04 - Project Phantom: The Manifold Paradox
+
+**Objective:** Neutralize subject-specific domain shift for ZAB through Test-Time Centroid Adaptation (TTCA) and style-variance suppression.
+
+### 📊 Performance Comparison (v1.7 vs. v1.8):
+
+| **Metric** | **v1.7 (Ghost)** | **v1.8 (Phantom)** | **Status** |
+| :--- | :--- | :--- | :--- |
+| **Seen Top-1 Accuracy** | 8.28% | **7.48%** | 📉 Degradation |
+| **Seen Top-5 Accuracy** | 48.41% | **39.97%** | 📉 Discriminability Loss |
+| **Unseen Top-1 (ZAB)** | 0.26% | **0.00%** | ❌ Semantic Collapse |
+| **Unseen Top-5 (ZAB)** | 0.51% | **0.00%** | ❌ Semantic Collapse |
+| **Geometric Overlap** | High Gap | **Near Perfect** | ✅ Manifold Merged |
+
+### 🔍 Technical Diagnosis:
+1. **The Paradox of Alignment:** t-SNE visualization confirms that ZAB embeddings now occupy the same hyperspace coordinates as the Text embeddings. However, the 0% accuracy proves that the *internal structure* of the ZAB cluster has collapsed into a non-discriminative "blob"[cite: 1, 4].
+2. **Over-Regularization:** The Style Residual Regularization ($\gamma=0.1$) was too punitive. It forced the model to discard subject-specific noise at the cost of fine-grained semantic features.
+3. **Retrieval Instability:** TTCA moved the "cloud" but did not fix the "alignment within the cloud." Combined with a low temperature ($\tau=0.02$), any minor mismatch was penalized heavily by the InfoNCE loss, leading to zero hits.
+
+---
+
 ## [v1.7] 2026-05-03 - Project Ghost: The Zero-Shot Breakthrough
 
 **Objective:** Overcome the domain-shift barrier for unseen subjects via stochastic centroid perturbation and domain smoothing.
