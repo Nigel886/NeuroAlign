@@ -4,6 +4,27 @@ This document tracks the iterative development of the NeuroAlign framework, focu
 
 ---
 
+## [v1.8.1] 2026-05-04 - Project Phantom: The Manifold Paradox
+
+**Objective:** Neutralize subject-specific domain shift for ZAB through DANN-based feature inversion and Momentum-based Centering ($ \alpha=0.8 $) to align neural manifolds with Llama-3 semantic space.
+
+### 📊 Performance Comparison (v1.7 vs. v1.8.1):
+
+| **Metric** | **v1.7 (Ghost)** | **v1.8.1 (Phantom)** | **Status** |
+| :--- | :--- | :--- | :--- |
+| **Seen Top-1 Accuracy** | 8.28% | **9.46%** | 📈 Improvement |
+| **Seen Top-5 Accuracy** | 48.41% | **49.39%** | 📈 Stability |
+| **Unseen Top-1 (ZAB)** | 0.26% | **0.13%** | ❌ Semantic Collapse |
+| **Unseen Top-5 (ZAB)** | 0.51% | **0.26%** | ❌ Semantic Collapse |
+| **Geometric Overlap** | High Segregation | **Near Perfect** | ✅ Seen Domains Merged |
+
+### 🔍 Technical Diagnosis:
+1. **The Paradox of Alignment:** t-SNE 结果显示 `ZKH`, `ZKW`, `ZMG`, `ZPH` 的特征空间实现了近乎完美的流形合并 (Manifold Merging)。然而，尽管 ZAB 嵌入在几何上强行靠近了 Text 区域，但其 0.13% 的 Top-1 准确率证明了 ZAB 集群的内部结构已坍塌为非判别性的“点云 (blob)”，失去了与特定语义标签的映射关系。
+2. **Momentum Over-Regularization:** 动量中心化 ($ \alpha=0.8 $) 过于强力。它强制模型维持了一个对已见域极其友好的“刚性中心”，导致模型为了追求域间的一致性，剥离了跨被试通用语义所需的细微特征，产生了严重的特征退化。
+3. **Modal Gap Persistence:** 尽管 DANN 消除了 Seen subjects 之间的个体差异，但 Seen EEG 集群与 Text/ZAB 集群之间仍存在显著的垂直断裂。这表明模型学会了“消除身份信息”，但尚未真正建立“脑电-文本”的跨模态桥梁。
+
+---
+
 ## [v1.8] 2026-05-04 - Project Phantom: The Manifold Paradox
 
 **Objective:** Neutralize subject-specific domain shift for ZAB through Test-Time Centroid Adaptation (TTCA) and style-variance suppression.
