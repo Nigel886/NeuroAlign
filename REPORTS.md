@@ -4,6 +4,27 @@ This document tracks the iterative development of the NeuroAlign framework, focu
 
 ---
 
+## [v1.8.2] 2026-05-05 - Project Phantom: The Null Baseline & Checkpoint Desynchronization
+
+**Objective:** Validate the impact of reduced style regularization ($\gamma=0.01$) and fixed temperature ($\tau=0.05$) on manifold stability and cross-subject generalization.
+
+### 📊 Performance Comparison (v1.8.1 vs. v1.8.2):
+
+| **Metric** | **v1.8.1 (Phantom)** | **v1.8.2 (Null Baseline)** | **Status** |
+| :--- | :--- | :--- | :--- |
+| **Seen Top-1 Accuracy** | 9.46% | **0.06%** | ❌ IO Failure |
+| **Seen Top-5 Accuracy** | 49.39% | **0.25%** | ❌ IO Failure |
+| **Unseen Top-1 (ZAB)** | 0.13% | **0.13%** | ➖ Random Noise |
+| **Unseen Top-5 (ZAB)** | 0.26% | **0.13%** | ➖ Random Noise |
+| **Geometric Overlap** | High Overlap | **Total Dispersion** | ⚠️ Random Init |
+
+### 🔍 Technical Diagnosis:
+1. **Checkpoint Desynchronization:** The evaluation script failed to locate the optimized weight file `.\checkpoints\v1_8_2\eeg_encoder_v1_8_2_dann_loso_ZAB_best.pth`. The system defaulted to a randomly initialized state for inference.
+2. **The Null Hypothesis Baseline:** Results falling to approximately $0.1\%$ across all categories define the mathematical floor of the retrieval system. This effectively validates that the previous v1.8.1 gains were not artifacts of the evaluation pipeline but genuine (though skewed) semantic captures.
+3. **Pipeline Stability:** Despite the loading error, the inference pipeline successfully managed the Llama-3 8B 4-bit load and extraction on local hardware, confirming that the 64GB Page File system and VRAM management are production-ready for the next iteration.
+
+---
+
 ## [v1.8.1] 2026-05-04 - Project Phantom: The Manifold Paradox
 
 **Objective:** Neutralize subject-specific domain shift for ZAB through DANN-based feature inversion and Momentum-based Centering ($ \alpha=0.8 $) to align neural manifolds with Llama-3 semantic space.

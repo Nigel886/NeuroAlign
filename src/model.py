@@ -237,6 +237,7 @@ def load_frozen_llm(model_name="meta-llama/Meta-Llama-3-8B-Instruct"):
         model_name,
         quantization_config=bnb_config,
         device_map="auto",
+        low_cpu_mem_usage=True,
         trust_remote_code=True
     )
     
