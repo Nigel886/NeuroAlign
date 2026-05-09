@@ -37,6 +37,11 @@ class ContrastiveLoss(nn.Module):
         self.logit_scale = nn.Parameter(torch.tensor(math.log(1 / temperature), dtype=torch.float32))
         self.margin = float(margin)
 
+    def _clamped_scale(self):
+        min_log = 0.0
+        max_log = float(math.log(100.0))
+        return self.logit_scale.clamp(min=min_log, max=max_log).exp()
+
     def forward(self, eeg_features, text_features):
         """
         CLIP-style InfoNCE Loss
@@ -48,7 +53,7 @@ class ContrastiveLoss(nn.Module):
         text_features = F.normalize(text_features, p=2, dim=-1)
         
         # 计算相似度矩阵
-        scale = self.logit_scale.exp()
+        scale = self._clamped_scale()
         similarity = torch.matmul(eeg_features, text_features.t())
         if self.margin != 0.0:
             bsz = int(eeg_features.size(0))
@@ -60,15 +65,15 @@ class ContrastiveLoss(nn.Module):
         # Ground truth: 对角线应该是最相似的
         labels = torch.arange(eeg_features.size(0), device=eeg_features.device)
         
-        loss_eeg = F.cross_entropy(logits_per_eeg, labels)
-        loss_text = F.cross_entropy(logits_per_text, labels)
+        loss_eeg = F.cross_entropy(logits_per_eeg, labels, reduction="mean")
+        loss_text = F.cross_entropy(logits_per_text, labels, reduction="mean")
         
         return (loss_eeg + loss_text) / 2
 
     def forward_eeg_to_text_bank(self, eeg_features, text_bank, labels=None):
         eeg_features = F.normalize(eeg_features, p=2, dim=-1)
         text_bank = F.normalize(text_bank, p=2, dim=-1)
-        scale = self.logit_scale.exp()
+        scale = self._clamped_scale()
         similarity = torch.matmul(eeg_features, text_bank.t())
         if labels is None:
             labels = torch.arange(eeg_features.size(0), device=eeg_features.device)
@@ -77,7 +82,7 @@ class ContrastiveLoss(nn.Module):
             idx = torch.arange(bsz, device=similarity.device)
             similarity[idx, labels] = similarity[idx, labels] - self.margin
         logits = similarity * scale
-        return F.cross_entropy(logits, labels)
+        return F.cross_entropy(logits, labels, reduction="mean")
 
 
 class MemoryBank(nn.Module):
@@ -236,6 +241,8 @@ def train_one_epoch(
                     aug_mode=True,
                     subject_labels=subject_labels,
                 )
+                z_semantic = F.normalize(z_semantic.to(dtype=torch.float32), p=2, dim=-1).to(dtype=z_semantic.dtype)
+                text_features = F.normalize(text_features.to(dtype=torch.float32), p=2, dim=-1).to(dtype=text_features.dtype)
                 if getattr(model, "centroid_tracker", None) is None:
                     model.centroid_tracker = CentroidTracker(dim=int(text_features.size(-1)), momentum=centroid_momentum).to(device)
                 model.centroid_tracker.update(z_semantic, text_features)
@@ -253,6 +260,7 @@ def train_one_epoch(
                         aug_mode=True,
                         subject_labels=subject_labels,
                     )
+                    z_semantic = F.normalize(z_semantic.to(dtype=torch.float32), p=2, dim=-1).to(dtype=z_semantic.dtype)
                 if subject_logits.size(-1) != len(subject_to_idx):
                     raise ValueError(
                         f"subject_logits dim={subject_logits.size(-1)} but num_subjects={len(subject_to_idx)}. "
@@ -264,17 +272,19 @@ def train_one_epoch(
                 total_align += float(alignment_loss.detach().item())
                 subject_loss = ce_loss(subject_logits, subject_labels)
 
-                z_sem = z_semantic.to(dtype=torch.float32)
+                z_sem = z_semantic.detach().to(dtype=torch.float32)
                 z_sty = z_style.to(dtype=torch.float32)
                 z_sem_s = z_sem[:, : z_sty.size(1)]
-                dot = torch.sum(z_sem_s * z_sty, dim=1)
-                denom = (z_sem_s.norm(dim=1) * z_sty.norm(dim=1)).clamp(min=1e-6)
+                dot = torch.sum(z_sem_s * z_sty, dim=1).abs()
+                denom = z_sem_s.norm(dim=1) * z_sty.norm(dim=1) + 1e-6
                 ortho_loss = torch.mean((dot / denom) ** 2)
 
                 dann_loss = lambda_subject * subject_loss
                 loss = alignment_loss + dann_loss + 0.1 * ortho_loss
             else:
                 z_semantic, z_style = model(eeg, src_key_padding_mask=src_key_padding_mask)
+                z_semantic = F.normalize(z_semantic.to(dtype=torch.float32), p=2, dim=-1).to(dtype=z_semantic.dtype)
+                text_features = F.normalize(text_features.to(dtype=torch.float32), p=2, dim=-1).to(dtype=text_features.dtype)
                 if getattr(model, "centroid_tracker", None) is None:
                     model.centroid_tracker = CentroidTracker(dim=int(text_features.size(-1)), momentum=centroid_momentum).to(device)
                 model.centroid_tracker.update(z_semantic, text_features)
@@ -288,6 +298,7 @@ def train_one_epoch(
                         src_key_padding_mask=src_key_padding_mask,
                         centering_delta=delta_noisy,
                     )
+                    z_semantic = F.normalize(z_semantic.to(dtype=torch.float32), p=2, dim=-1).to(dtype=z_semantic.dtype)
                 text_bank = torch.cat([text_features, model.memory_bank.queue.detach().to(device=device, dtype=text_features.dtype)], dim=0)
                 labels = torch.arange(z_semantic.size(0), device=device)
                 alignment_loss = criterion.forward_eeg_to_text_bank(z_semantic, text_bank, labels=labels) * alignment_weight

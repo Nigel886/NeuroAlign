@@ -98,8 +98,6 @@ class EEGTransformerEncoder(nn.Module):
         # proj_style: (d_model -> 128) for DANN
         self.proj_semantic = nn.Linear(d_model, output_dim)
         self.proj_style = nn.Linear(d_model, self.style_dim)
-        self.proj_semantic.to(dtype=torch.float16)
-        self.proj_style.to(dtype=torch.float16)
         self.centering = CenteringLayer(output_dim) if enable_centering else None
 
         self.subject_classifier = (
@@ -132,7 +130,7 @@ class EEGTransformerEncoder(nn.Module):
         self.input_projection.bias.data.zero_()
         self.input_projection.weight.data.uniform_(-initrange, initrange)
         
-        nn.init.xavier_normal_(self.proj_semantic.weight)
+        nn.init.xavier_uniform_(self.proj_semantic.weight)
         nn.init.constant_(self.proj_semantic.bias, 0)
         nn.init.xavier_normal_(self.proj_style.weight)
         nn.init.constant_(self.proj_style.bias, 0)
@@ -174,14 +172,12 @@ class EEGTransformerEncoder(nn.Module):
         else:
             pooled_output = torch.mean(output, dim=1)
             
-        pooled_fp16 = pooled_output.to(dtype=torch.float16)
-
-        z_semantic = self.proj_semantic(pooled_fp16)
+        z_semantic = self.proj_semantic(pooled_output)
         if self.centering is not None:
             z_semantic = self.centering(z_semantic, delta=centering_delta)
         z_semantic = F.normalize(z_semantic, p=2, dim=-1)
 
-        z_style = self.proj_style(pooled_fp16)
+        z_style = self.proj_style(pooled_output)
         if aug_mode:
             bsz = int(z_style.size(0))
             if bsz > 1:

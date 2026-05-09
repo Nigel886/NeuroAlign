@@ -99,20 +99,15 @@ def run_retrieval_eval(model, llm, dataloader, device, test_subject_id=None):
             
             # 1. EEG 嵌入提取
             src_key_padding_mask = (eeg_mask == 0)
-            if delta is not None and hasattr(model, "centering") and model.centering is not None:
+            if delta is not None and getattr(model, "centering", None) is not None:
                 out = model(eeg, src_key_padding_mask=src_key_padding_mask, centering_delta=delta)
             else:
                 out = model(eeg, src_key_padding_mask=src_key_padding_mask)
-                if delta is not None:
-                    if isinstance(out, (tuple, list)):
-                        out0 = out[0]
-                        out = (out0.to(dtype=torch.float32) + delta, *out[1:])
-                    else:
-                        out = F.normalize(out.to(dtype=torch.float32) + delta, p=2, dim=-1)
-
             eeg_feat = out[0] if isinstance(out, (tuple, list)) else out
-            if isinstance(out, (tuple, list)) and delta is not None and not (hasattr(model, "centering") and model.centering is not None):
-                eeg_feat = F.normalize(eeg_feat.to(dtype=torch.float32), p=2, dim=-1)
+            eeg_feat = eeg_feat.detach().to(dtype=torch.float32)
+            if delta is not None and getattr(model, "centering", None) is None:
+                eeg_feat = eeg_feat + delta
+            eeg_feat = F.normalize(eeg_feat, p=2, dim=-1)
             
             # 2. Text 嵌入提取 (LLM)
             outputs = llm(input_ids=input_ids, attention_mask=attention_mask, output_hidden_states=True)
@@ -127,8 +122,8 @@ def run_retrieval_eval(model, llm, dataloader, device, test_subject_id=None):
             
     all_eeg_features = torch.cat(all_eeg_features, dim=0)
     all_text_features = torch.cat(all_text_features, dim=0)
-    all_eeg_features = F.normalize(all_eeg_features, p=2, dim=-1)
-    all_text_features = F.normalize(all_text_features, p=2, dim=-1)
+    all_eeg_features = F.normalize(all_eeg_features.to(dtype=torch.float32), p=2, dim=-1)
+    all_text_features = F.normalize(all_text_features.to(dtype=torch.float32), p=2, dim=-1)
 
     test_subject = str(test_subject_id).upper() if test_subject_id is not None else None
     if test_subject and any(s is not None for s in all_subject_ids):
