@@ -100,12 +100,19 @@ def run_retrieval_eval(model, llm, dataloader, device, test_subject_id=None):
             # 1. EEG 嵌入提取
             src_key_padding_mask = (eeg_mask == 0)
             if delta is not None and hasattr(model, "centering") and model.centering is not None:
-                eeg_feat = model(eeg, src_key_padding_mask=src_key_padding_mask, centering_delta=delta)
+                out = model(eeg, src_key_padding_mask=src_key_padding_mask, centering_delta=delta)
             else:
-                eeg_feat = model(eeg, src_key_padding_mask=src_key_padding_mask)
+                out = model(eeg, src_key_padding_mask=src_key_padding_mask)
                 if delta is not None:
-                    eeg_feat = eeg_feat.to(dtype=torch.float32) + delta
-                    eeg_feat = F.normalize(eeg_feat, p=2, dim=-1)
+                    if isinstance(out, (tuple, list)):
+                        out0 = out[0]
+                        out = (out0.to(dtype=torch.float32) + delta, *out[1:])
+                    else:
+                        out = F.normalize(out.to(dtype=torch.float32) + delta, p=2, dim=-1)
+
+            eeg_feat = out[0] if isinstance(out, (tuple, list)) else out
+            if isinstance(out, (tuple, list)) and delta is not None and not (hasattr(model, "centering") and model.centering is not None):
+                eeg_feat = F.normalize(eeg_feat.to(dtype=torch.float32), p=2, dim=-1)
             
             # 2. Text 嵌入提取 (LLM)
             outputs = llm(input_ids=input_ids, attention_mask=attention_mask, output_hidden_states=True)

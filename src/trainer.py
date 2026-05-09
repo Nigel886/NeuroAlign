@@ -152,9 +152,6 @@ def train_one_epoch(
     optimizer.zero_grad()
 
     alignment_weight = 15.0
-    subject_weight = 0.5
-    gamma_ortho = 0.5
-    gamma_style_reg = 0.01
     centroid_momentum = float(centering_momentum)
     criterion = ContrastiveLoss(temperature=0.05, margin=float(margin)).to(device)
     existing_params = {id(p) for group in optimizer.param_groups for p in group["params"]}
@@ -194,10 +191,8 @@ def train_one_epoch(
         progress = current_step / denom
         if epoch <= warmup_epochs:
             lambda_subject = 0.0
-            gamma_ortho_eff = 0.0
         else:
             lambda_subject = _dann_lambda(progress)
-            gamma_ortho_eff = gamma_ortho
 
         subject_ids = batch.get("subject_ids", None)
         batch_subject_labels = batch.get("subject_labels", None)
@@ -233,28 +228,26 @@ def train_one_epoch(
         # 2. 混合精度前向传播
         with autocast():
             if use_subject:
-                eeg_features, subject_logits, content_features, style_features = model(
+                z_semantic, z_style, subject_logits = model(
                     eeg,
                     src_key_padding_mask=src_key_padding_mask,
                     return_subject_logits=True,
-                    return_decomposed_features=True,
                     grl_alpha=lambda_subject,
                     aug_mode=True,
                     subject_labels=subject_labels,
                 )
                 if getattr(model, "centroid_tracker", None) is None:
                     model.centroid_tracker = CentroidTracker(dim=int(text_features.size(-1)), momentum=centroid_momentum).to(device)
-                model.centroid_tracker.update(eeg_features, text_features)
-                delta = model.centroid_tracker.delta().to(device=device, dtype=eeg_features.dtype)
+                model.centroid_tracker.update(z_semantic, text_features)
+                delta = model.centroid_tracker.delta().to(device=device, dtype=z_semantic.dtype)
                 if use_centering and hasattr(model, "set_centering_delta"):
                     model.set_centering_delta(delta)
                 delta_noisy = _centroid_perturb(delta, ratio=0.05) if use_centering else None
                 if use_centering and delta_noisy is not None:
-                    eeg_features, subject_logits, content_features, style_features = model(
+                    z_semantic, z_style, subject_logits = model(
                         eeg,
                         src_key_padding_mask=src_key_padding_mask,
                         return_subject_logits=True,
-                        return_decomposed_features=True,
                         grl_alpha=lambda_subject,
                         centering_delta=delta_noisy,
                         aug_mode=True,
@@ -266,34 +259,38 @@ def train_one_epoch(
                         "Construct model with num_subjects matching the training subjects."
                     )
                 text_bank = torch.cat([text_features, model.memory_bank.queue.detach().to(device=device, dtype=text_features.dtype)], dim=0)
-                labels = torch.arange(eeg_features.size(0), device=device)
-                alignment_loss = criterion.forward_eeg_to_text_bank(eeg_features, text_bank, labels=labels) * alignment_weight
+                labels = torch.arange(z_semantic.size(0), device=device)
+                alignment_loss = criterion.forward_eeg_to_text_bank(z_semantic, text_bank, labels=labels) * alignment_weight
                 total_align += float(alignment_loss.detach().item())
-                subject_loss = ce_loss(subject_logits, subject_labels) * subject_weight
-                style_reg = torch.var(style_features.to(dtype=torch.float32), dim=0, unbiased=False).mean()
-                content_norm = F.normalize(content_features, p=2, dim=-1)
-                style_norm = F.normalize(style_features, p=2, dim=-1)
-                cross = torch.matmul(content_norm.transpose(0, 1), style_norm) / float(content_norm.size(0))
-                ortho_loss = torch.mean(cross ** 2)
-                loss = alignment_loss + lambda_subject * subject_loss + gamma_ortho_eff * ortho_loss + gamma_style_reg * style_reg
+                subject_loss = ce_loss(subject_logits, subject_labels)
+
+                z_sem = z_semantic.to(dtype=torch.float32)
+                z_sty = z_style.to(dtype=torch.float32)
+                z_sem_s = z_sem[:, : z_sty.size(1)]
+                dot = torch.sum(z_sem_s * z_sty, dim=1)
+                denom = (z_sem_s.norm(dim=1) * z_sty.norm(dim=1)).clamp(min=1e-6)
+                ortho_loss = torch.mean((dot / denom) ** 2)
+
+                dann_loss = lambda_subject * subject_loss
+                loss = alignment_loss + dann_loss + 0.1 * ortho_loss
             else:
-                eeg_features = model(eeg, src_key_padding_mask=src_key_padding_mask)
+                z_semantic, z_style = model(eeg, src_key_padding_mask=src_key_padding_mask)
                 if getattr(model, "centroid_tracker", None) is None:
                     model.centroid_tracker = CentroidTracker(dim=int(text_features.size(-1)), momentum=centroid_momentum).to(device)
-                model.centroid_tracker.update(eeg_features, text_features)
-                delta = model.centroid_tracker.delta().to(device=device, dtype=eeg_features.dtype)
+                model.centroid_tracker.update(z_semantic, text_features)
+                delta = model.centroid_tracker.delta().to(device=device, dtype=z_semantic.dtype)
                 if use_centering and hasattr(model, "set_centering_delta"):
                     model.set_centering_delta(delta)
                 delta_noisy = _centroid_perturb(delta, ratio=0.05) if use_centering else None
                 if use_centering and delta_noisy is not None:
-                    eeg_features = model(
+                    z_semantic, z_style = model(
                         eeg,
                         src_key_padding_mask=src_key_padding_mask,
                         centering_delta=delta_noisy,
                     )
                 text_bank = torch.cat([text_features, model.memory_bank.queue.detach().to(device=device, dtype=text_features.dtype)], dim=0)
-                labels = torch.arange(eeg_features.size(0), device=device)
-                alignment_loss = criterion.forward_eeg_to_text_bank(eeg_features, text_bank, labels=labels) * alignment_weight
+                labels = torch.arange(z_semantic.size(0), device=device)
+                alignment_loss = criterion.forward_eeg_to_text_bank(z_semantic, text_bank, labels=labels) * alignment_weight
                 total_align += float(alignment_loss.detach().item())
                 subject_loss = None
                 ortho_loss = None
@@ -323,8 +320,6 @@ def train_one_epoch(
             postfix["subj"] = float(subject_loss.detach().item())
         if ortho_loss is not None:
             postfix["ortho"] = float(ortho_loss.detach().item())
-        if "style_reg" in locals() and style_reg is not None:
-            postfix["style_reg"] = float(style_reg.detach().item())
         pbar.set_postfix(postfix)
         
     denom_batches = max(1, len(dataloader))

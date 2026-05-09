@@ -91,17 +91,15 @@ class EEGTransformerEncoder(nn.Module):
         )
         self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
         
-        if int(content_dim) + int(style_dim) != int(d_model):
-            raise ValueError(f"content_dim({content_dim}) + style_dim({style_dim}) must equal d_model({d_model})")
-        self.content_dim = int(content_dim)
         self.style_dim = int(style_dim)
 
-        # 4. Alignment Head (MLP 层): 384 -> 2048 -> 4096
-        self.alignment_head = nn.Sequential(
-            nn.Linear(self.content_dim, 2048),
-            nn.ReLU(),
-            nn.Linear(2048, output_dim)
-        )
+        # 4. Dual-head projection
+        # proj_semantic: (d_model -> 4096) for Llama-3 space
+        # proj_style: (d_model -> 128) for DANN
+        self.proj_semantic = nn.Linear(d_model, output_dim)
+        self.proj_style = nn.Linear(d_model, self.style_dim)
+        self.proj_semantic.to(dtype=torch.float16)
+        self.proj_style.to(dtype=torch.float16)
         self.centering = CenteringLayer(output_dim) if enable_centering else None
 
         self.subject_classifier = (
@@ -134,11 +132,10 @@ class EEGTransformerEncoder(nn.Module):
         self.input_projection.bias.data.zero_()
         self.input_projection.weight.data.uniform_(-initrange, initrange)
         
-        # 对 Alignment Head 进行初始化
-        for m in self.alignment_head:
-            if isinstance(m, nn.Linear):
-                nn.init.xavier_normal_(m.weight)
-                nn.init.constant_(m.bias, 0)
+        nn.init.xavier_normal_(self.proj_semantic.weight)
+        nn.init.constant_(self.proj_semantic.bias, 0)
+        nn.init.xavier_normal_(self.proj_style.weight)
+        nn.init.constant_(self.proj_style.bias, 0)
         if self.subject_classifier is not None:
             for m in self.subject_classifier:
                 if isinstance(m, nn.Linear):
@@ -150,7 +147,6 @@ class EEGTransformerEncoder(nn.Module):
         src,
         src_key_padding_mask=None,
         return_subject_logits=False,
-        return_decomposed_features=False,
         grl_alpha=1.0,
         centering_delta=None,
         aug_mode=False,
@@ -178,12 +174,18 @@ class EEGTransformerEncoder(nn.Module):
         else:
             pooled_output = torch.mean(output, dim=1)
             
-        content_features = pooled_output[:, : self.content_dim]
-        style_features = pooled_output[:, self.content_dim : self.content_dim + self.style_dim]
+        pooled_fp16 = pooled_output.to(dtype=torch.float16)
+
+        z_semantic = self.proj_semantic(pooled_fp16)
+        if self.centering is not None:
+            z_semantic = self.centering(z_semantic, delta=centering_delta)
+        z_semantic = F.normalize(z_semantic, p=2, dim=-1)
+
+        z_style = self.proj_style(pooled_fp16)
         if aug_mode:
-            bsz = int(style_features.size(0))
+            bsz = int(z_style.size(0))
             if bsz > 1:
-                device = style_features.device
+                device = z_style.device
                 perm = torch.randperm(bsz, device=device)
                 if subject_labels is not None and torch.is_tensor(subject_labels) and int(subject_labels.numel()) == bsz:
                     labels = subject_labels.to(device=device)
@@ -193,28 +195,18 @@ class EEGTransformerEncoder(nn.Module):
                             break
                         perm2 = torch.randperm(bsz, device=device)
                         perm = torch.where(same, perm2, perm)
-                other = style_features[perm]
-                lam = torch.rand(bsz, 1, device=device, dtype=style_features.dtype)
-                style_features = lam * style_features + (1.0 - lam) * other
-
-        # 对齐映射 (384 -> 4096)
-        aligned_output = self.alignment_head(content_features)
-        if self.centering is not None:
-            aligned_output = self.centering(aligned_output, delta=centering_delta)
-        aligned_output = F.normalize(aligned_output, p=2, dim=-1)
+                other = z_style[perm]
+                lam = torch.rand(bsz, 1, device=device, dtype=z_style.dtype)
+                z_style = lam * z_style + (1.0 - lam) * other
 
         if return_subject_logits:
             if self.subject_classifier is None:
                 raise ValueError("Subject classifier is not enabled. Set num_subjects when constructing the model.")
-            rev = ReverseLayerF.apply(style_features, grl_alpha)
+            rev = ReverseLayerF.apply(z_style, grl_alpha)
             subject_logits = self.subject_classifier(rev)
-            if return_decomposed_features:
-                return aligned_output, subject_logits, content_features, style_features
-            return aligned_output, subject_logits
+            return z_semantic, z_style, subject_logits
 
-        if return_decomposed_features:
-            return aligned_output, content_features, style_features
-        return aligned_output
+        return z_semantic, z_style
 
     @torch.no_grad()
     def set_centering_delta(self, delta):
