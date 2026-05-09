@@ -39,7 +39,7 @@ class ContrastiveLoss(nn.Module):
 
     def _clamped_scale(self):
         min_log = 0.0
-        max_log = float(math.log(100.0))
+        max_log = float(math.log(200.0))
         return self.logit_scale.clamp(min=min_log, max=max_log).exp()
 
     def forward(self, eeg_features, text_features):
@@ -156,7 +156,7 @@ def train_one_epoch(
     total_align = 0
     optimizer.zero_grad()
 
-    alignment_weight = 15.0
+    alignment_weight = 20.0
     centroid_momentum = float(centering_momentum)
     criterion = ContrastiveLoss(temperature=0.05, margin=float(margin)).to(device)
     criterion.logit_scale.requires_grad = bool(epoch > 2)
@@ -287,7 +287,7 @@ def train_one_epoch(
                 ortho_loss = torch.mean(cross ** 2)
 
                 dann_loss = lambda_subject * subject_loss
-                loss = alignment_loss + dann_loss + 0.1 * ortho_loss
+                loss = alignment_loss + dann_loss + 0.05 * ortho_loss
             else:
                 z_semantic, z_style = model(eeg, src_key_padding_mask=src_key_padding_mask)
                 z_semantic = F.normalize(z_semantic.to(dtype=torch.float32), p=2, dim=-1).to(dtype=z_semantic.dtype)
@@ -315,7 +315,7 @@ def train_one_epoch(
                 z_sty = F.normalize(z_style.to(dtype=torch.float32), p=2, dim=-1)
                 cross = torch.matmul(z_sem.transpose(0, 1), z_sty) / float(z_sem.size(0))
                 ortho_loss = torch.mean(cross ** 2)
-                loss = alignment_loss + 0.1 * ortho_loss
+                loss = alignment_loss + 0.05 * ortho_loss
 
             unscaled_loss = loss
             loss = loss / accumulation_steps

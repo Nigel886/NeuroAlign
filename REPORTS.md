@@ -3,6 +3,26 @@
 This document tracks the iterative development of the NeuroAlign framework, focusing on the alignment between EEG signals and LLM semantic embeddings.
 
 ---
+## [v1.8.4] 2026-05-10 - Project Phantom: The Manifold Collapse
+
+**Objective:** Push the performance ceiling by increasing alignment pressure ($\lambda_{align}=20$) and sharpening the temperature threshold ($\tau_{max}=5.3$).
+
+### 📊 Performance Comparison (v1.8.3 vs. v1.8.4):
+
+| **Metric** | **v1.8.3 (Breakthrough)** | **v1.8.4 (Collapse)** | **Status** |
+| :--- | :--- | :--- | :--- |
+| **Seen Top-1 Accuracy** | 2.17% | **0.73%** | ❌ Manifold Collapse |
+| **Seen Top-5 Accuracy** | 12.77% | **3.92%** | ❌ Manifold Collapse |
+| **Unseen Top-1 (ZAB)** | 5.74% | **1.02%** | ❌ Generalization Loss |
+| **Unseen Top-5 (ZAB)** | 22.32% | **4.34%** | ❌ Generalization Loss |
+| **Logit Scale Max** | 4.605 | **5.300** | ⚠️ Over-Aggressive |
+
+### 🔍 Technical Diagnosis:
+1. **The Temperature Trap:** Increasing `logit_scale` to 5.3 (Temperature $\approx 0.005$) forced the model to amplify micro-noise in EEG signals as decisive semantic features. This shattered the continuous semantic manifold into discrete, non-generalizable clusters.
+2. **Disentanglement Failure:** Lowering `ortho_weight` to 0.05 allowed identity noise to leak back into the semantic branch. The model "cheated" by using subject-specific artifacts to lower training loss, leading to a total failure on the Unseen subject (ZAB).
+3. **Weight Imbalance:** A high `alignment_weight` (20.0) without sufficient regularization (Ortho Loss) led to "Catastrophic Overfitting."
+
+---
 
 ## [v1.8.3] 2026-05-10 - Project Phantom: The Decoupling Breakthrough
 
