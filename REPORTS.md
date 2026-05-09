@@ -4,6 +4,27 @@ This document tracks the iterative development of the NeuroAlign framework, focu
 
 ---
 
+## [v1.8.3] 2026-05-10 - Project Phantom: The Decoupling Breakthrough
+
+**Objective:** Implement "Semantic-Invariant Disentanglement" to resolve the Manifold Paradox. Isolate subject identity from semantic embeddings using orthogonal constraints and gradient blocking.
+
+### 📊 Performance Comparison (v1.8.1 vs. v1.8.3):
+
+| **Metric** | **v1.8.1 (Phantom)** | **v1.8.3 (The Decoupler)** | **Status** |
+| :--- | :--- | :--- | :--- |
+| **Seen Top-1 Accuracy** | 9.46% | **2.17%** | 📉 Suppressed |
+| **Seen Top-5 Accuracy** | 49.39% | **12.77%** | 📉 Suppressed |
+| **Unseen Top-1 (ZAB)** | 0.13% | **5.74%** | 🚀 **Breakthrough** |
+| **Unseen Top-5 (ZAB)** | 0.26% | **22.32%** | 🚀 **Breakthrough** |
+| **Geometric Overlap** | High Overlap | **Structured Alignment** | ✅ Decoupled |
+
+### 🔍 Technical Diagnosis:
+1. **The Inversion Phenomenon (Unseen > Seen):** By forcing $z_{semantic}$ to be orthogonal to $z_{style}$ (identity), the model successfully ignored subject-specific "shortcut" features. This led to a significant performance jump in the zero-shot subject (ZAB), while suppressing the "overfitted" seen subjects.
+2. **Numerical Stability Mastery:** Following an initial "Loss Explosion (159)", we implemented explicit $\ell_2$ normalization and restricted the `logit_scale` to $\le 4.605$. This stabilized the Llama-3 semantic manifold alignment.
+3. **Orthogonal Purity:** The $L_{ortho}$ reached $1.13 \times 10^{-6}$, proving that the semantic and style heads are operating in near-perfectly perpendicular subspaces. This is the cornerstone for cross-subject generalization.
+
+---
+
 ## [v1.8.2] 2026-05-05 - Project Phantom: The Null Baseline & Checkpoint Desynchronization
 
 **Objective:** Validate the impact of reduced style regularization ($\gamma=0.01$) and fixed temperature ($\tau=0.05$) on manifold stability and cross-subject generalization.

@@ -34,7 +34,7 @@ class CentroidTracker(nn.Module):
 class ContrastiveLoss(nn.Module):
     def __init__(self, temperature=0.07, margin=0.0):
         super(ContrastiveLoss, self).__init__()
-        self.logit_scale = nn.Parameter(torch.tensor(math.log(1 / temperature), dtype=torch.float32))
+        self.logit_scale = nn.Parameter(torch.tensor(0.0, dtype=torch.float32))
         self.margin = float(margin)
 
     def _clamped_scale(self):
@@ -159,6 +159,7 @@ def train_one_epoch(
     alignment_weight = 15.0
     centroid_momentum = float(centering_momentum)
     criterion = ContrastiveLoss(temperature=0.05, margin=float(margin)).to(device)
+    criterion.logit_scale.requires_grad = bool(epoch > 2)
     existing_params = {id(p) for group in optimizer.param_groups for p in group["params"]}
     new_params = [p for p in criterion.parameters() if id(p) not in existing_params]
     if new_params:
@@ -171,6 +172,12 @@ def train_one_epoch(
     
     pbar = tqdm(dataloader, desc="Training")
     for step, batch in enumerate(pbar):
+        if step % accumulation_steps == 0:
+            window_count = 0
+            window_loss_sum = 0.0
+            window_align_sum = 0.0
+            window_subj_sum = 0.0
+            window_ortho_sum = 0.0
         # 将数据移至设备
         input_ids = batch['input_ids'].to(device)
         attention_mask = batch['attention_mask'].to(device)
@@ -270,14 +277,14 @@ def train_one_epoch(
                 labels = torch.arange(z_semantic.size(0), device=device)
                 alignment_loss = criterion.forward_eeg_to_text_bank(z_semantic, text_bank, labels=labels) * alignment_weight
                 total_align += float(alignment_loss.detach().item())
+                if epoch == 1 and step == 0:
+                    print(f"DEBUG - Batch Align Loss: {alignment_loss.item()}")
                 subject_loss = ce_loss(subject_logits, subject_labels)
 
-                z_sem = z_semantic.detach().to(dtype=torch.float32)
-                z_sty = z_style.to(dtype=torch.float32)
-                z_sem_s = z_sem[:, : z_sty.size(1)]
-                dot = torch.sum(z_sem_s * z_sty, dim=1).abs()
-                denom = z_sem_s.norm(dim=1) * z_sty.norm(dim=1) + 1e-6
-                ortho_loss = torch.mean((dot / denom) ** 2)
+                z_sem = F.normalize(z_semantic.detach().to(dtype=torch.float32), p=2, dim=-1)
+                z_sty = F.normalize(z_style.to(dtype=torch.float32), p=2, dim=-1)
+                cross = torch.matmul(z_sem.transpose(0, 1), z_sty) / float(z_sem.size(0))
+                ortho_loss = torch.mean(cross ** 2)
 
                 dann_loss = lambda_subject * subject_loss
                 loss = alignment_loss + dann_loss + 0.1 * ortho_loss
@@ -304,9 +311,13 @@ def train_one_epoch(
                 alignment_loss = criterion.forward_eeg_to_text_bank(z_semantic, text_bank, labels=labels) * alignment_weight
                 total_align += float(alignment_loss.detach().item())
                 subject_loss = None
-                ortho_loss = None
-                loss = alignment_loss
+                z_sem = F.normalize(z_semantic.detach().to(dtype=torch.float32), p=2, dim=-1)
+                z_sty = F.normalize(z_style.to(dtype=torch.float32), p=2, dim=-1)
+                cross = torch.matmul(z_sem.transpose(0, 1), z_sty) / float(z_sem.size(0))
+                ortho_loss = torch.mean(cross ** 2)
+                loss = alignment_loss + 0.1 * ortho_loss
 
+            unscaled_loss = loss
             loss = loss / accumulation_steps
             
         # 3. 反向传播
@@ -320,17 +331,24 @@ def train_one_epoch(
             scaler.update()
             optimizer.zero_grad()
             
-        total_loss += loss.item() * accumulation_steps
+        window_count += 1
+        window_loss_sum += float(unscaled_loss.detach().item())
+        window_align_sum += float((alignment_loss.detach().item() / alignment_weight) if alignment_weight != 0 else alignment_loss.detach().item())
+        if subject_loss is not None:
+            window_subj_sum += float(subject_loss.detach().item())
+        if ortho_loss is not None:
+            window_ortho_sum += float(ortho_loss.detach().item())
+
+        total_loss += float(unscaled_loss.detach().item())
         model.memory_bank.enqueue(text_features)
         postfix = {
-            "loss": loss.item() * accumulation_steps,
+            "loss": window_loss_sum / max(1, window_count),
             "lambda": float(lambda_subject),
         }
-        postfix["align"] = float(alignment_loss.detach().item())
+        postfix["align"] = window_align_sum / max(1, window_count)
         if subject_loss is not None:
-            postfix["subj"] = float(subject_loss.detach().item())
-        if ortho_loss is not None:
-            postfix["ortho"] = float(ortho_loss.detach().item())
+            postfix["subj"] = window_subj_sum / max(1, window_count)
+        postfix["ortho"] = window_ortho_sum / max(1, window_count)
         pbar.set_postfix(postfix)
         
     denom_batches = max(1, len(dataloader))
