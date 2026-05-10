@@ -2,6 +2,7 @@ import torch
 import argparse
 import os
 from torch.cuda.amp import GradScaler
+from torch.optim.lr_scheduler import CosineAnnealingLR
 from src.model import EEGTransformerEncoder, load_frozen_llm
 from src.data_loader import get_dataloader, get_loso_loaders
 from src.trainer import train_one_epoch, save_checkpoint
@@ -93,6 +94,7 @@ def main(args):
 
     optimizer = torch.optim.AdamW(param_groups)
     scaler = GradScaler()
+    scheduler = CosineAnnealingLR(optimizer, T_max=80, eta_min=1e-6)
 
     # 6. 训练循环
     print(f"\nStarting NeuroAlign Training for {args.epochs} epochs...")
@@ -156,6 +158,8 @@ def main(args):
                 best_align = epoch_align
                 save_checkpoint(model, "best", path=checkpoint_root)
                 print(f"New best model saved with align loss: {best_align:.4f}")
+
+        scheduler.step()
 
     print("\nTraining completed successfully!")
 

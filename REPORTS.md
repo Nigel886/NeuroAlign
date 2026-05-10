@@ -3,6 +3,26 @@
 This document tracks the iterative development of the NeuroAlign framework, focusing on the alignment between EEG signals and LLM semantic embeddings.
 
 ---
+## [v1.8.5] 2026-05-10 - Project Phantom: The Over-trained Void
+
+**Objective:** Restore v1.8.3 performance using a more refined Cosine Annealing scheduler and extended training (80 epochs).
+
+### 📊 Performance Comparison (v1.8.3 vs. v1.8.5):
+
+| **Metric** | **v1.8.3 (Peak)** | **v1.8.5 (Over-trained)** | **Status** |
+| :--- | :--- | :--- | :--- |
+| **Seen Top-1 Accuracy** | 2.17% | **0.45%** | ❌ Manifold Dissolution |
+| **Seen Top-5 Accuracy** | 12.77% | **2.20%** | ❌ Manifold Dissolution |
+| **Unseen Top-1 (ZAB)** | 5.74% | **0.38%** | ❌ Generalization Floor |
+| **Unseen Top-5 (ZAB)** | 22.32% | **1.91%** | ❌ Generalization Floor |
+| **Training Epochs** | 50 | **80** | ⚠️ Too Long |
+
+### 🔍 Technical Diagnosis:
+1. **The Over-disentanglement Trap:** Prolonged training with orthogonal loss ($\lambda=0.1$) forced the semantic head to discard all information correlated with subject identity. Given the low SNR of EEG, much of the semantic intent is physically intertwined with physiological signals. 80 epochs effectively "bleached" the useful signal.
+2. **LR Scheduler Mismatch:** The Cosine Annealing strategy dropped the learning rate to $1e-6$ too late in the process, locking the model into a degenerate state where text embeddings and EEG features are decoupled rather than aligned.
+3. **Replication of v1.8.3:** This failure confirms that v1.8.3 was not a "lucky run" but a specific hyperparameter sweet spot between under-fitting and signal erasure.
+
+---
 ## [v1.8.4] 2026-05-10 - Project Phantom: The Manifold Collapse
 
 **Objective:** Push the performance ceiling by increasing alignment pressure ($\lambda_{align}=20$) and sharpening the temperature threshold ($\tau_{max}=5.3$).
