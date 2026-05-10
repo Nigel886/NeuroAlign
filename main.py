@@ -2,7 +2,6 @@ import torch
 import argparse
 import os
 from torch.cuda.amp import GradScaler
-from torch.optim.lr_scheduler import CosineAnnealingLR
 from src.model import EEGTransformerEncoder, load_frozen_llm
 from src.data_loader import get_dataloader, get_loso_loaders
 from src.trainer import train_one_epoch, save_checkpoint
@@ -94,7 +93,6 @@ def main(args):
 
     optimizer = torch.optim.AdamW(param_groups)
     scaler = GradScaler()
-    scheduler = CosineAnnealingLR(optimizer, T_max=80, eta_min=1e-6)
 
     # 6. 训练循环
     print(f"\nStarting NeuroAlign Training for {args.epochs} epochs...")
@@ -106,6 +104,8 @@ def main(args):
     
     best_loss = float('inf')
     best_align = float("inf")
+    early_stop_patience = 5
+    epochs_no_improve = 0
     
     for epoch in range(1, args.epochs + 1):
         epoch_loss, epoch_align = train_one_epoch(
@@ -125,6 +125,7 @@ def main(args):
         )
         
         print(f"Epoch {epoch}/{args.epochs} - Total Loss: {epoch_loss:.4f} | Align Loss: {epoch_align:.4f}")
+        improved = bool(epoch_align < best_align)
 
         if args.loso_test_subject is not None:
             version_tag = str(args.version_tag)
@@ -158,8 +159,17 @@ def main(args):
                 best_align = epoch_align
                 save_checkpoint(model, "best", path=checkpoint_root)
                 print(f"New best model saved with align loss: {best_align:.4f}")
-
-        scheduler.step()
+        
+        if improved:
+            epochs_no_improve = 0
+        else:
+            epochs_no_improve += 1
+            if epochs_no_improve >= early_stop_patience:
+                print(
+                    f"Early stopping: align loss has not improved for {early_stop_patience} consecutive epochs "
+                    f"(best_align={best_align:.4f})."
+                )
+                break
 
     print("\nTraining completed successfully!")
 
@@ -187,7 +197,7 @@ if __name__ == "__main__":
     parser.set_defaults(use_centering=True)
     parser.add_argument("--centering_momentum", type=float, default=0.5, help="EMA momentum for centroid tracking (v1.4)")
     parser.add_argument("--version_tag", type=str, default="v1_5", help="Version tag used to group checkpoints (e.g., v1_5, v1_6)")
-    parser.add_argument("--temperature", type=float, default=0.07, help="Initial temperature for contrastive loss (trainable logit_scale)")
+    parser.add_argument("--temperature", type=float, default=0.05, help="Initial temperature for contrastive loss (trainable logit_scale)")
     parser.add_argument("--margin", type=float, default=0.2, help="Similarity margin for InfoNCE positive pairs")
     
     args = parser.parse_args()

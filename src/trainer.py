@@ -32,15 +32,42 @@ class CentroidTracker(nn.Module):
         return self.text_centroid - self.eeg_centroid
 
 class ContrastiveLoss(nn.Module):
-    def __init__(self, temperature=0.07, margin=0.0):
+    def __init__(self, temperature=0.05, margin=0.0, hard_neg_fraction=0.1, hard_neg_weight=1.2):
         super(ContrastiveLoss, self).__init__()
-        self.logit_scale = nn.Parameter(torch.tensor(0.0, dtype=torch.float32))
+        self.logit_scale = nn.Parameter(torch.tensor(math.log(1.0 / float(temperature)), dtype=torch.float32))
         self.margin = float(margin)
+        self.hard_neg_fraction = float(hard_neg_fraction)
+        self.hard_neg_weight = float(hard_neg_weight)
 
     def _clamped_scale(self):
         min_log = 0.0
         max_log = float(math.log(100.0))
         return self.logit_scale.clamp(min=min_log, max=max_log).exp()
+
+    def _apply_hard_negative_weighting(self, similarity, logits, pos_idx):
+        if self.hard_neg_weight <= 1.0 or self.hard_neg_fraction <= 0.0:
+            return logits
+        bsz, ncols = similarity.shape
+        if ncols <= 1:
+            return logits
+        num_negs = ncols - 1
+        k = int(math.ceil(self.hard_neg_fraction * num_negs))
+        k = max(1, min(k, num_negs))
+
+        sim = similarity
+        device = sim.device
+        rows = torch.arange(bsz, device=device)
+        neg_mask = torch.ones_like(sim, dtype=torch.bool)
+        neg_mask[rows, pos_idx] = False
+
+        neg_sim = sim.masked_fill(~neg_mask, torch.finfo(sim.dtype).min)
+        topk_idx = torch.topk(neg_sim, k=k, dim=1, largest=True).indices
+        boost = float(math.log(self.hard_neg_weight))
+
+        out = logits
+        out = out.clone()
+        out[rows.unsqueeze(1), topk_idx] = out[rows.unsqueeze(1), topk_idx] + boost
+        return out
 
     def forward(self, eeg_features, text_features):
         """
@@ -55,15 +82,16 @@ class ContrastiveLoss(nn.Module):
         # 计算相似度矩阵
         scale = self._clamped_scale()
         similarity = torch.matmul(eeg_features, text_features.t())
+        bsz = int(eeg_features.size(0))
+        pos_idx = torch.arange(bsz, device=similarity.device)
         if self.margin != 0.0:
-            bsz = int(eeg_features.size(0))
-            idx = torch.arange(bsz, device=similarity.device)
-            similarity[idx, idx] = similarity[idx, idx] - self.margin
+            similarity[pos_idx, pos_idx] = similarity[pos_idx, pos_idx] - self.margin
         logits_per_eeg = similarity * scale
+        logits_per_eeg = self._apply_hard_negative_weighting(similarity, logits_per_eeg, pos_idx)
         logits_per_text = logits_per_eeg.t()
         
         # Ground truth: 对角线应该是最相似的
-        labels = torch.arange(eeg_features.size(0), device=eeg_features.device)
+        labels = pos_idx
         
         loss_eeg = F.cross_entropy(logits_per_eeg, labels, reduction="mean")
         loss_text = F.cross_entropy(logits_per_text, labels, reduction="mean")
@@ -82,6 +110,7 @@ class ContrastiveLoss(nn.Module):
             idx = torch.arange(bsz, device=similarity.device)
             similarity[idx, labels] = similarity[idx, labels] - self.margin
         logits = similarity * scale
+        logits = self._apply_hard_negative_weighting(similarity, logits, labels)
         return F.cross_entropy(logits, labels, reduction="mean")
 
 
@@ -158,8 +187,7 @@ def train_one_epoch(
 
     alignment_weight = 15.0
     centroid_momentum = float(centering_momentum)
-    criterion = ContrastiveLoss(temperature=0.05, margin=float(margin)).to(device)
-    criterion.logit_scale.requires_grad = bool(epoch > 2)
+    criterion = ContrastiveLoss(temperature=float(temperature), margin=float(margin)).to(device)
     existing_params = {id(p) for group in optimizer.param_groups for p in group["params"]}
     new_params = [p for p in criterion.parameters() if id(p) not in existing_params]
     if new_params:
