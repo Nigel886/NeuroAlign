@@ -29,17 +29,6 @@ def main(args):
             shuffle=True,
         )
 
-    num_subjects = None
-    if args.enable_dann:
-        subject_to_idx = getattr(getattr(train_loader, "dataset", None), "subject_to_idx", None)
-        if isinstance(subject_to_idx, dict) and len(subject_to_idx) > 0:
-            num_subjects = len(subject_to_idx)
-        else:
-            raise ValueError(
-                "DANN is enabled but no valid subject_to_idx mapping is available. "
-                "Ensure your preprocessed .pt samples contain subject_id and you are loading multiple subjects."
-            )
-
     # 3. 加载冻结的 LLM (4-bit 量化)
     # 这将作为我们的语义潜空间目标
     llm, target_dim = load_frozen_llm(args.llm_name)
@@ -51,9 +40,6 @@ def main(args):
         nhead=8, 
         num_layers=4, 
         output_dim=target_dim,
-        target_embed_dim=int(getattr(llm.config, "hidden_size", 4096)),
-        num_subjects=num_subjects,
-        subject_hidden_dim=args.subject_hidden_dim,
         enable_centering=args.use_centering,
     ).to(device)
 
@@ -75,24 +61,8 @@ def main(args):
             f"(dropped={dropped}, missing={len(missing)}, unexpected={len(unexpected)})"
         )
 
-    # 5. 优化器与混合精度缩放器（Differential LR）
-    subject_params = []
-    main_params = []
-    for name, param in model.named_parameters():
-        if not param.requires_grad:
-            continue
-        if name.startswith("subject_classifier."):
-            subject_params.append(param)
-        else:
-            main_params.append(param)
-
-    param_groups = [
-        {"params": main_params, "lr": args.lr, "weight_decay": 1e-4},
-    ]
-    if len(subject_params) > 0:
-        param_groups.append({"params": subject_params, "lr": args.lr_subject, "weight_decay": 1e-4})
-
-    optimizer = torch.optim.AdamW(param_groups)
+    # 5. 优化器与混合精度缩放器
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     scaler = GradScaler()
 
     # 6. 训练循环
@@ -132,8 +102,6 @@ def main(args):
             version_tag = str(args.version_tag)
             subj = args.loso_test_subject.upper()
             parts = ["eeg_encoder", version_tag]
-            if args.enable_dann:
-                parts.append("dann")
             parts.append(f"loso_{subj}")
             base_name = "_".join(parts)
             print(f"Run tag: {base_name}")
@@ -186,12 +154,9 @@ if __name__ == "__main__":
     # 训练超参数
     parser.add_argument("--epochs", type=int, default=50, help="Number of training epochs")
     parser.add_argument("--batch_size", type=int, default=2, help="Batch size per step (keep small for 8GB VRAM)")
-    parser.add_argument("--lr", type=float, default=5e-5, help="Learning rate")
+    parser.add_argument("--lr", type=float, default=3e-5, help="Learning rate")
     parser.add_argument("--grad_accum", type=int, default=4, help="Gradient accumulation steps")
     parser.add_argument("--loso_test_subject", type=str, default=None, help="Leave-One-Subject-Out test subject ID (e.g., ZAB)")
-    parser.add_argument("--enable_dann", action="store_true", help="Enable DANN-style subject-adversarial training (v1.2)")
-    parser.add_argument("--subject_hidden_dim", type=int, default=256, help="Hidden dim of subject classifier MLP (v1.2)")
-    parser.add_argument("--lr_subject", type=float, default=1e-5, help="Learning rate for subject_classifier branch (v1.2)")
     parser.add_argument("--init_checkpoint", type=str, default=None, help="Initialize model weights from a checkpoint (compatible load)")
     parser.add_argument("--use_centering", action="store_true", help="Enable v1.4 centering delta in AlignmentHead")
     parser.add_argument("--no_centering", dest="use_centering", action="store_false", help="Disable v1.4 centering delta in AlignmentHead")

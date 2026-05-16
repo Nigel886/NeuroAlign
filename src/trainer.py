@@ -32,12 +32,24 @@ class CentroidTracker(nn.Module):
         return self.text_centroid - self.eeg_centroid
 
 class ContrastiveLoss(nn.Module):
-    def __init__(self, temperature=0.05, margin=0.0, hard_neg_fraction=0.1, hard_neg_weight=1.2):
+    def __init__(self, temperature=0.05, margin=0.0, hard_neg_fraction=0.1):
         super(ContrastiveLoss, self).__init__()
         self.logit_scale = nn.Parameter(torch.tensor(math.log(1.0 / float(temperature)), dtype=torch.float32))
         self.margin = float(margin)
         self.hard_neg_fraction = float(hard_neg_fraction)
-        self.hard_neg_weight = float(hard_neg_weight)
+        self.current_epoch = 0
+
+    def set_epoch(self, epoch):
+        self.current_epoch = int(epoch)
+
+    def _hard_neg_weight(self):
+        e = int(self.current_epoch)
+        if e < 10:
+            return 1.0
+        if e < 30:
+            t = (e - 10) / 20.0
+            return 1.0 + t * (1.2 - 1.0)
+        return 1.35
 
     def _clamped_scale(self):
         min_log = 0.0
@@ -45,7 +57,8 @@ class ContrastiveLoss(nn.Module):
         return self.logit_scale.clamp(min=min_log, max=max_log).exp()
 
     def _apply_hard_negative_weighting(self, similarity, logits, pos_idx):
-        if self.hard_neg_weight <= 1.0 or self.hard_neg_fraction <= 0.0:
+        hard_w = float(self._hard_neg_weight())
+        if hard_w <= 1.0 or self.hard_neg_fraction <= 0.0:
             return logits
         bsz, ncols = similarity.shape
         if ncols <= 1:
@@ -60,9 +73,9 @@ class ContrastiveLoss(nn.Module):
         neg_mask = torch.ones_like(sim, dtype=torch.bool)
         neg_mask[rows, pos_idx] = False
 
-        neg_sim = sim.masked_fill(~neg_mask, torch.finfo(sim.dtype).min)
+        neg_sim = sim.masked_fill(~neg_mask, -10000.0)
         topk_idx = torch.topk(neg_sim, k=k, dim=1, largest=True).indices
-        boost = float(math.log(self.hard_neg_weight))
+        boost = float(math.log(hard_w))
 
         out = logits
         out = out.clone()
@@ -145,25 +158,6 @@ class MemoryBank(nn.Module):
             self.queue[: end - self.queue_size].copy_(keys[first:].to(device=self.queue.device))
         self.queue_ptr.fill_(end % self.queue_size)
 
-def _build_subject_mapping(dataloader):
-    dataset = getattr(dataloader, "dataset", None)
-    subject_to_idx = getattr(dataset, "subject_to_idx", None) if dataset is not None else None
-    if isinstance(subject_to_idx, dict) and len(subject_to_idx) > 0:
-        return {str(k).upper(): int(v) for k, v in subject_to_idx.items()}
-    items = getattr(dataset, "data", None) if dataset is not None else None
-    if not isinstance(items, list):
-        return {}
-    subject_ids = []
-    for it in items:
-        if isinstance(it, dict) and it.get("subject_id") is not None:
-            subject_ids.append(str(it["subject_id"]).upper())
-    subject_ids = sorted({sid for sid in subject_ids if sid != "UNK"})
-    return {sid: i for i, sid in enumerate(subject_ids)}
-
-def _dann_lambda(progress):
-    p = float(max(0.0, min(1.0, progress)))
-    return float(2.0 / (1.0 + math.exp(-10.0 * p)) - 1.0)
-
 def train_one_epoch(
     model,
     llm,
@@ -188,14 +182,12 @@ def train_one_epoch(
     alignment_weight = 15.0
     centroid_momentum = float(centering_momentum)
     criterion = ContrastiveLoss(temperature=float(temperature), margin=float(margin)).to(device)
+    criterion.set_epoch(epoch - 1)
     existing_params = {id(p) for group in optimizer.param_groups for p in group["params"]}
     new_params = [p for p in criterion.parameters() if id(p) not in existing_params]
     if new_params:
         optimizer.add_param_group({"params": new_params})
 
-    ce_loss = nn.CrossEntropyLoss(ignore_index=-1).to(device)
-    aux_mse = nn.MSELoss().to(device)
-    subject_to_idx = _build_subject_mapping(dataloader)
     if getattr(model, "memory_bank", None) is None:
         model.memory_bank = MemoryBank(queue_size=1024, dim=int(getattr(llm.config, "hidden_size", 4096))).to(device)
     
@@ -231,32 +223,6 @@ def train_one_epoch(
         denom = max(1, total_epochs * len(dataloader))
         current_step = (epoch - 1) * len(dataloader) + step
         progress = current_step / denom
-        if epoch <= warmup_epochs:
-            lambda_subject = 0.0
-        else:
-            lambda_subject = _dann_lambda(progress)
-
-        subject_ids = batch.get("subject_ids", None)
-        batch_subject_labels = batch.get("subject_labels", None)
-        use_subject = (
-            getattr(model, "subject_classifier", None) is not None
-            and len(subject_to_idx) > 0
-            and (torch.is_tensor(batch_subject_labels) or isinstance(subject_ids, list))
-        )
-        if use_subject:
-            if torch.is_tensor(batch_subject_labels):
-                subject_labels = batch_subject_labels.to(device=device, dtype=torch.long)
-            else:
-                labels = []
-                for sid in subject_ids:
-                    if sid is None:
-                        labels.append(-1)
-                    else:
-                        labels.append(subject_to_idx.get(str(sid).upper(), -1))
-                subject_labels = torch.tensor(labels, dtype=torch.long, device=device)
-        else:
-            subject_labels = None
-
         def _centroid_perturb(delta, ratio=0.05):
             if delta is None or not torch.is_tensor(delta):
                 return None
@@ -269,97 +235,35 @@ def train_one_epoch(
 
         # 2. 混合精度前向传播
         with autocast():
-            if use_subject:
-                z_semantic, z_style, subject_logits, aux_embed = model(
+            z_semantic, z_style = model(eeg, src_key_padding_mask=src_key_padding_mask)
+            z_semantic = F.normalize(z_semantic.to(dtype=torch.float32), p=2, dim=-1).to(dtype=z_semantic.dtype)
+            text_features = F.normalize(text_features.to(dtype=torch.float32), p=2, dim=-1).to(dtype=text_features.dtype)
+            if getattr(model, "centroid_tracker", None) is None:
+                model.centroid_tracker = CentroidTracker(dim=int(text_features.size(-1)), momentum=centroid_momentum).to(device)
+            model.centroid_tracker.update(z_semantic, text_features)
+            delta = model.centroid_tracker.delta().to(device=device, dtype=z_semantic.dtype)
+            if use_centering and hasattr(model, "set_centering_delta"):
+                model.set_centering_delta(delta)
+            delta_noisy = _centroid_perturb(delta, ratio=0.05) if use_centering else None
+            if use_centering and delta_noisy is not None:
+                z_semantic, z_style = model(
                     eeg,
                     src_key_padding_mask=src_key_padding_mask,
-                    return_subject_logits=True,
-                    return_aux_embed=True,
-                    grl_alpha=lambda_subject,
-                    aug_mode=True,
-                    subject_labels=subject_labels,
+                    centering_delta=delta_noisy,
                 )
                 z_semantic = F.normalize(z_semantic.to(dtype=torch.float32), p=2, dim=-1).to(dtype=z_semantic.dtype)
-                text_features = F.normalize(text_features.to(dtype=torch.float32), p=2, dim=-1).to(dtype=text_features.dtype)
-                if getattr(model, "centroid_tracker", None) is None:
-                    model.centroid_tracker = CentroidTracker(dim=int(text_features.size(-1)), momentum=centroid_momentum).to(device)
-                model.centroid_tracker.update(z_semantic, text_features)
-                delta = model.centroid_tracker.delta().to(device=device, dtype=z_semantic.dtype)
-                if use_centering and hasattr(model, "set_centering_delta"):
-                    model.set_centering_delta(delta)
-                delta_noisy = _centroid_perturb(delta, ratio=0.05) if use_centering else None
-                if use_centering and delta_noisy is not None:
-                    z_semantic, z_style, subject_logits, aux_embed = model(
-                        eeg,
-                        src_key_padding_mask=src_key_padding_mask,
-                        return_subject_logits=True,
-                        return_aux_embed=True,
-                        grl_alpha=lambda_subject,
-                        centering_delta=delta_noisy,
-                        aug_mode=True,
-                        subject_labels=subject_labels,
-                    )
-                    z_semantic = F.normalize(z_semantic.to(dtype=torch.float32), p=2, dim=-1).to(dtype=z_semantic.dtype)
-                if subject_logits.size(-1) != len(subject_to_idx):
-                    raise ValueError(
-                        f"subject_logits dim={subject_logits.size(-1)} but num_subjects={len(subject_to_idx)}. "
-                        "Construct model with num_subjects matching the training subjects."
-                    )
-                text_bank = torch.cat([text_features, model.memory_bank.queue.detach().to(device=device, dtype=text_features.dtype)], dim=0)
-                labels = torch.arange(z_semantic.size(0), device=device)
-                alignment_loss = criterion.forward_eeg_to_text_bank(z_semantic, text_bank, labels=labels) * alignment_weight
-                total_align += float(alignment_loss.detach().item())
-                if epoch == 1 and step == 0:
-                    print(f"DEBUG - Batch Align Loss: {alignment_loss.item()}")
-                subject_loss = ce_loss(subject_logits, subject_labels)
-
-                z_sem = F.normalize(z_semantic.detach().to(dtype=torch.float32), p=2, dim=-1)
-                z_sty = F.normalize(z_style.to(dtype=torch.float32), p=2, dim=-1)
-                cross = torch.matmul(z_sem.transpose(0, 1), z_sty) / float(z_sem.size(0))
-                ortho_loss = torch.mean(cross ** 2)
-
-                aux_loss = aux_mse(
-                    aux_embed.to(dtype=torch.float32),
-                    text_features_target.to(dtype=torch.float32),
-                )
-
-                dann_loss = lambda_subject * subject_loss
-                loss = alignment_loss + dann_loss + 0.1 * ortho_loss
-                loss = loss + 0.1 * aux_loss
-            else:
-                z_semantic, z_style, aux_embed = model(eeg, src_key_padding_mask=src_key_padding_mask, return_aux_embed=True)
-                z_semantic = F.normalize(z_semantic.to(dtype=torch.float32), p=2, dim=-1).to(dtype=z_semantic.dtype)
-                text_features = F.normalize(text_features.to(dtype=torch.float32), p=2, dim=-1).to(dtype=text_features.dtype)
-                if getattr(model, "centroid_tracker", None) is None:
-                    model.centroid_tracker = CentroidTracker(dim=int(text_features.size(-1)), momentum=centroid_momentum).to(device)
-                model.centroid_tracker.update(z_semantic, text_features)
-                delta = model.centroid_tracker.delta().to(device=device, dtype=z_semantic.dtype)
-                if use_centering and hasattr(model, "set_centering_delta"):
-                    model.set_centering_delta(delta)
-                delta_noisy = _centroid_perturb(delta, ratio=0.05) if use_centering else None
-                if use_centering and delta_noisy is not None:
-                    z_semantic, z_style, aux_embed = model(
-                        eeg,
-                        src_key_padding_mask=src_key_padding_mask,
-                        centering_delta=delta_noisy,
-                        return_aux_embed=True,
-                    )
-                    z_semantic = F.normalize(z_semantic.to(dtype=torch.float32), p=2, dim=-1).to(dtype=z_semantic.dtype)
-                text_bank = torch.cat([text_features, model.memory_bank.queue.detach().to(device=device, dtype=text_features.dtype)], dim=0)
-                labels = torch.arange(z_semantic.size(0), device=device)
-                alignment_loss = criterion.forward_eeg_to_text_bank(z_semantic, text_bank, labels=labels) * alignment_weight
-                total_align += float(alignment_loss.detach().item())
-                subject_loss = None
-                z_sem = F.normalize(z_semantic.detach().to(dtype=torch.float32), p=2, dim=-1)
-                z_sty = F.normalize(z_style.to(dtype=torch.float32), p=2, dim=-1)
-                cross = torch.matmul(z_sem.transpose(0, 1), z_sty) / float(z_sem.size(0))
-                ortho_loss = torch.mean(cross ** 2)
-                aux_loss = aux_mse(
-                    aux_embed.to(dtype=torch.float32),
-                    text_features_target.to(dtype=torch.float32),
-                )
-                loss = alignment_loss + 0.1 * ortho_loss
-                loss = loss + 0.1 * aux_loss
+            text_bank = torch.cat([text_features, model.memory_bank.queue.detach().to(device=device, dtype=text_features.dtype)], dim=0)
+            labels = torch.arange(z_semantic.size(0), device=device)
+            alignment_loss = criterion.forward_eeg_to_text_bank(z_semantic, text_bank, labels=labels) * alignment_weight
+            total_align += float(alignment_loss.detach().item())
+            if epoch == 1 and step == 0:
+                print(f"DEBUG - Batch Align Loss: {alignment_loss.item()}")
+            z_sem = F.normalize(z_semantic.detach().to(dtype=torch.float32), p=2, dim=-1)
+            z_sty = F.normalize(z_style.to(dtype=torch.float32), p=2, dim=-1)
+            cross = torch.matmul(z_sem.transpose(0, 1), z_sty) / float(z_sem.size(0))
+            ortho_loss = torch.mean(cross ** 2)
+            loss = alignment_loss + 0.1 * ortho_loss
+            subject_loss = None
 
             unscaled_loss = loss
             loss = loss / accumulation_steps
@@ -387,7 +291,6 @@ def train_one_epoch(
         model.memory_bank.enqueue(text_features)
         postfix = {
             "loss": window_loss_sum / max(1, window_count),
-            "lambda": float(lambda_subject),
         }
         postfix["align"] = window_align_sum / max(1, window_count)
         if subject_loss is not None:

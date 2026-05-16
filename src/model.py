@@ -4,16 +4,6 @@ import torch.nn.functional as F
 import math
 from transformers import AutoModelForCausalLM, BitsAndBytesConfig
 
-class ReverseLayerF(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, x, alpha):
-        ctx.alpha = float(alpha)
-        return x.view_as(x)
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        return -ctx.alpha * grad_output, None
-
 class PositionalEncoding(nn.Module):
     def __init__(self, d_model, dropout=0.1, max_len=5000):
         super(PositionalEncoding, self).__init__()
@@ -67,9 +57,6 @@ class EEGTransformerEncoder(nn.Module):
         dim_feedforward=2048,
         dropout=0.1,
         output_dim=4096,
-        target_embed_dim=4096,
-        num_subjects=None,
-        subject_hidden_dim=256,
         content_dim=384,
         style_dim=128,
         enable_centering=True,
@@ -93,40 +80,16 @@ class EEGTransformerEncoder(nn.Module):
         self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
         
         self.style_dim = int(style_dim)
-        self.target_embed_dim = int(target_embed_dim)
 
         # 4. Dual-head projection
         # proj_semantic: (d_model -> 4096) for Llama-3 space
-        # proj_style: (d_model -> 128) for DANN
+        # proj_style: (d_model -> 128) for disentanglement regularization
         self.proj_semantic = nn.Linear(d_model, output_dim)
         self.proj_style = nn.Linear(d_model, self.style_dim)
         self.centering = CenteringLayer(output_dim) if enable_centering else None
-        self.aux_regressor = nn.Linear(d_model, self.target_embed_dim)
-
-        self.subject_classifier = (
-            nn.Sequential(
-                nn.Linear(self.style_dim, int(subject_hidden_dim)),
-                nn.ReLU(),
-                nn.Linear(int(subject_hidden_dim), int(num_subjects)),
-            )
-            if num_subjects is not None
-            else None
-        )
-        if self.subject_classifier is not None:
-            self.register_buffer("subject_grad_norm", torch.zeros(1, dtype=torch.float32))
-            self.subject_classifier.register_full_backward_hook(self._subject_backward_hook)
         
         self.d_model = d_model
         self._init_weights()
-
-    def _subject_backward_hook(self, module, grad_input, grad_output):
-        if not grad_output:
-            return
-        g = grad_output[0]
-        if not torch.is_tensor(g):
-            return
-        with torch.no_grad():
-            self.subject_grad_norm.fill_(g.detach().to(dtype=torch.float32).norm())
 
     def _init_weights(self):
         initrange = 0.1
@@ -135,22 +98,12 @@ class EEGTransformerEncoder(nn.Module):
         
         nn.init.xavier_normal_(self.proj_style.weight)
         nn.init.constant_(self.proj_style.bias, 0)
-        if self.subject_classifier is not None:
-            for m in self.subject_classifier:
-                if isinstance(m, nn.Linear):
-                    nn.init.xavier_uniform_(m.weight)
-                    nn.init.constant_(m.bias, 0)
 
     def forward(
         self,
         src,
         src_key_padding_mask=None,
-        return_subject_logits=False,
-        return_aux_embed=False,
-        grl_alpha=1.0,
         centering_delta=None,
-        aug_mode=False,
-        subject_labels=None,
     ):
         """
         src: (batch_size, seq_len, input_dim)
@@ -173,8 +126,6 @@ class EEGTransformerEncoder(nn.Module):
             pooled_output = sum_output / count.clamp(min=1e-9)
         else:
             pooled_output = torch.mean(output, dim=1)
-            
-        aux_embed = self.aux_regressor(pooled_output)
 
         z_semantic = self.proj_semantic(pooled_output)
         if self.centering is not None:
@@ -182,34 +133,6 @@ class EEGTransformerEncoder(nn.Module):
         z_semantic = F.normalize(z_semantic, p=2, dim=-1)
 
         z_style = self.proj_style(pooled_output)
-        if aug_mode:
-            bsz = int(z_style.size(0))
-            if bsz > 1:
-                device = z_style.device
-                perm = torch.randperm(bsz, device=device)
-                if subject_labels is not None and torch.is_tensor(subject_labels) and int(subject_labels.numel()) == bsz:
-                    labels = subject_labels.to(device=device)
-                    for _ in range(5):
-                        same = labels == labels[perm]
-                        if not bool(same.any().item()):
-                            break
-                        perm2 = torch.randperm(bsz, device=device)
-                        perm = torch.where(same, perm2, perm)
-                other = z_style[perm]
-                lam = torch.rand(bsz, 1, device=device, dtype=z_style.dtype)
-                z_style = lam * z_style + (1.0 - lam) * other
-
-        if return_subject_logits:
-            if self.subject_classifier is None:
-                raise ValueError("Subject classifier is not enabled. Set num_subjects when constructing the model.")
-            rev = ReverseLayerF.apply(z_style, grl_alpha)
-            subject_logits = self.subject_classifier(rev)
-            if return_aux_embed:
-                return z_semantic, z_style, subject_logits, aux_embed
-            return z_semantic, z_style, subject_logits
-
-        if return_aux_embed:
-            return z_semantic, z_style, aux_embed
 
         return z_semantic, z_style
 
@@ -256,4 +179,4 @@ if __name__ == "__main__":
     
     test_input = torch.randn(4, 15, 105)
     out = model(test_input)
-    print(f"Aligned EEG Feature Shape: {out.shape}") # (4, 4096)
+    print(f"Aligned EEG Feature Shape: {out[0].shape}") # (4, 4096)

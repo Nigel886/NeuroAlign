@@ -1,0 +1,21 @@
+{
+  "checkpoint": "C:\\Users\\Nigel Yan\\Desktop\\Personal\\NeuroAlign\\checkpoints\\v2_0_dynamic_hnm\\eeg_encoder_v2_0_dynamic_hnm_loso_ZAB_best.pth",
+  "checkpoint_version": "v2_0",
+  "data_path": "C:\\Users\\Nigel Yan\\Desktop\\Personal\\NeuroAlign\\data\\preprocessed",
+  "llm_name": "meta-llama/Meta-Llama-3-8B-Instruct",
+  "tokenizer_name": "meta-llama/Meta-Llama-3-8B-Instruct",
+  "batch_size": 4,
+  "test_subject_id": "ZAB",
+  "metrics": {
+    "num_samples": 3924,
+    "top1_all": 0.06167176365852356,
+    "top5_all": 0.35040774941444397,
+    "top1_unseen": 0.0012755101779475808,
+    "top5_unseen": 0.005102040711790323,
+    "unseen_subject_id": "ZAB",
+    "num_unseen": 784,
+    "top1_seen": 0.07675158977508545,
+    "top5_seen": 0.4366241991519928,
+    "num_seen": 3140
+  }
+}

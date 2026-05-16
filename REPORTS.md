@@ -4,6 +4,26 @@ This document tracks the iterative development of the NeuroAlign framework, focu
 
 ---
 
+## [v2.0_dynamic_hnm] 2026-05-16 - Project Phantom: The Repulsion Over-Sharpening
+
+**Objective:** Achieve clean cross-subject generalization without data leakage by introducing a curriculum-based dynamic Hard Negative Mining (HNM) factor (scaling from 1.0 to 1.35) on top of the pure 4-layer Transformer baseline.
+
+### 📊 Performance Comparison (v1.8.6 vs. v2.0_dynamic_hnm):
+
+| Metric | v1.8.6 (Golden Static) | v2.0_dynamic_hnm (Curriculum) | Status |
+| :--- | :--- | :--- | :--- |
+| **Seen Top-1 Accuracy** | 7.90% | **7.68%** | 📉 Slightly lower |
+| **Unseen Top-1 (ZAB)** | **12.88%** | **0.13%** | ❌ **Replication Failed** |
+| **Unseen Top-5 (ZAB)** | **54.34%** | **0.51%** | ❌ **Replication Failed** |
+| **HNM Policy** | Static 1.2x from Epoch 1 | **Dynamic 1.0 -> 1.2 -> 1.35** | ⚠️ Distorted optimization path |
+
+### 🔍 Technical Diagnosis:
+1. **Late-Stage Repulsion Overkill:** Increasing the HNM factor to 1.35 created an overly aggressive loss landscape. To push away difficult negative samples within the seen subjects, the 4-layer encoder weaponized microscopic physiological artifacts, building rigid geometric walls that completely locked out the unseen subject ZAB.
+2. **Early-Stage Relaxation Deficit:** Starting at 1.0 for the first 10 epochs allowed the model to settle into standard InfoNCE local minima. Without the strict 1.2x constraint from day one, the network failed to seed the cross-subject semantic bridge that defined v1.8.6's early trajectory.
+3. **The Chaos of Variable Curvature:** Dynamically altering the loss weight mid-training disrupted the delicate alignment topology. It proves that the "performance inversion" (Unseen > Seen) of v1.8.6 requires an unyielding, constant gradient pressure from the very first step.
+
+---
+
 ## [v2.0_beta] 2026-05-16 - Project Phantom: The Continuous Manifold Lock
 
 **Objective:** Mitigate the shortcut learning of v2.0_alpha by replacing discrete token classification with a continuous space MSE regression head mapping to Llama-3's 4096d hidden space, while restoring default initializations.
