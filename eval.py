@@ -77,11 +77,10 @@ def run_retrieval_eval(model, llm, dataloader, device, test_subject_id=None):
             # 1. EEG 嵌入提取
             src_key_padding_mask = (eeg_mask == 0)
             if delta is not None and getattr(model, "centering", None) is not None:
-                out = model(eeg, src_key_padding_mask=src_key_padding_mask, centering_delta=delta)
+                z_semantic, _ = model(eeg, src_key_padding_mask=src_key_padding_mask, centering_delta=delta)
             else:
-                out = model(eeg, src_key_padding_mask=src_key_padding_mask)
-            eeg_feat = out[0] if isinstance(out, (tuple, list)) else out
-            eeg_feat = eeg_feat.detach().to(dtype=torch.float32)
+                z_semantic, _ = model(eeg, src_key_padding_mask=src_key_padding_mask)
+            eeg_feat = z_semantic.detach().to(dtype=torch.float32)
             if delta is not None and getattr(model, "centering", None) is None:
                 eeg_feat = eeg_feat + delta
             eeg_feat = F.normalize(eeg_feat, p=2, dim=-1)

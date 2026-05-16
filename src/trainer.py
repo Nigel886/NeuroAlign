@@ -32,24 +32,12 @@ class CentroidTracker(nn.Module):
         return self.text_centroid - self.eeg_centroid
 
 class ContrastiveLoss(nn.Module):
-    def __init__(self, temperature=0.05, margin=0.0, hard_neg_fraction=0.1):
+    def __init__(self, temperature=0.05, margin=0.0, hard_neg_fraction=0.1, hard_neg_weight=1.2):
         super(ContrastiveLoss, self).__init__()
         self.logit_scale = nn.Parameter(torch.tensor(math.log(1.0 / float(temperature)), dtype=torch.float32))
         self.margin = float(margin)
         self.hard_neg_fraction = float(hard_neg_fraction)
-        self.current_epoch = 0
-
-    def set_epoch(self, epoch):
-        self.current_epoch = int(epoch)
-
-    def _hard_neg_weight(self):
-        e = int(self.current_epoch)
-        if e < 10:
-            return 1.0
-        if e < 30:
-            t = (e - 10) / 20.0
-            return 1.0 + t * (1.2 - 1.0)
-        return 1.35
+        self.hard_neg_weight = float(hard_neg_weight)
 
     def _clamped_scale(self):
         min_log = 0.0
@@ -57,7 +45,7 @@ class ContrastiveLoss(nn.Module):
         return self.logit_scale.clamp(min=min_log, max=max_log).exp()
 
     def _apply_hard_negative_weighting(self, similarity, logits, pos_idx):
-        hard_w = float(self._hard_neg_weight())
+        hard_w = float(self.hard_neg_weight)
         if hard_w <= 1.0 or self.hard_neg_fraction <= 0.0:
             return logits
         bsz, ncols = similarity.shape
@@ -181,8 +169,12 @@ def train_one_epoch(
 
     alignment_weight = 15.0
     centroid_momentum = float(centering_momentum)
-    criterion = ContrastiveLoss(temperature=float(temperature), margin=float(margin)).to(device)
-    criterion.set_epoch(epoch - 1)
+    criterion = ContrastiveLoss(
+        temperature=float(temperature),
+        margin=float(margin),
+        hard_neg_fraction=0.1,
+        hard_neg_weight=1.2,
+    ).to(device)
     existing_params = {id(p) for group in optimizer.param_groups for p in group["params"]}
     new_params = [p for p in criterion.parameters() if id(p) not in existing_params]
     if new_params:
@@ -258,11 +250,11 @@ def train_one_epoch(
             total_align += float(alignment_loss.detach().item())
             if epoch == 1 and step == 0:
                 print(f"DEBUG - Batch Align Loss: {alignment_loss.item()}")
-            z_sem = F.normalize(z_semantic.detach().to(dtype=torch.float32), p=2, dim=-1)
-            z_sty = F.normalize(z_style.to(dtype=torch.float32), p=2, dim=-1)
-            cross = torch.matmul(z_sem.transpose(0, 1), z_sty) / float(z_sem.size(0))
-            ortho_loss = torch.mean(cross ** 2)
-            loss = alignment_loss + 0.1 * ortho_loss
+            ortho_dim = int(min(z_semantic.size(-1), z_style.size(-1)))
+            z_sem_ortho = z_semantic[..., :ortho_dim].to(dtype=torch.float32)
+            z_sty_ortho = z_style[..., :ortho_dim].to(dtype=torch.float32)
+            ortho_loss = torch.mean(torch.abs(F.cosine_similarity(z_sem_ortho, z_sty_ortho, dim=-1)))
+            loss = alignment_loss + 0.5 * ortho_loss
             subject_loss = None
 
             unscaled_loss = loss
