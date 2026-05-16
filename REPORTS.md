@@ -3,6 +3,27 @@
 This document tracks the iterative development of the NeuroAlign framework, focusing on the alignment between EEG signals and LLM semantic embeddings.
 
 ---
+
+## [v2.0_alpha] 2026-05-16 - Project Phantom: The Semantic Hash Trap
+
+**Objective:** Solidify the 4-layer Transformer golden baseline from v1.8.6 and introduce a discrete token prediction head (128k vocab classification) as a semantic anchor to force the encoder to preserve fine-grained details, aiming to shatter the 12.88% bottleneck.
+
+### 📊 Performance Comparison (v1.8.6 vs. v2.0_alpha):
+
+| Metric | v1.8.6 (Golden Baseline) | v2.0_alpha (Current Run) | Status |
+| :--- | :--- | :--- | :--- |
+| **Seen Top-1 Accuracy** | 7.90% | **8.54%** | 📈 Surged (Severe Overfitting) |
+| **Seen Top-5 Accuracy** | 45.76% | **45.57%** | ⚠️ Stagnant |
+| **Unseen Top-1 (ZAB)** | **12.88%** | **0.00%** | ❌ **Total Collapse** |
+| **Unseen Top-5 (ZAB)** | **54.34%** | **0.26%** | ❌ **Total Collapse** |
+| **Auxiliary Loss Function** | None | **CrossEntropy (128k Vocab)** | ⚠️ Triggered Shortcut Learning |
+
+### 🔍 Technical Diagnosis:
+1. **Physiological Fingerprint Exploitation (Shortcut Learning):** Llama-3 features a massive vocabulary size of 128,256 tokens. Forcing a model to predict an absolute discrete label under low batch sizes (B=2) and limited data constraints is an incredibly ill-posed task. Instead of learning abstract semantic mappings, the encoder exploited the easiest route: using subject-specific physiological artifacts (e.g., skin impedance, unique neural noise patterns) as a hash key to memorize specific token IDs. This inflated Seen performance while rendering the model completely blind to Unseen subject ZAB.
+2. **Manifold Dislocation via Xavier Initialization:** Modifying the initialization of `proj_semantic` to `xavier_normal_` fundamentally altered the initial weight variance. This shifted the optimization trajectory's starting point entirely away from the delicate equilibrium zone discovered in v1.8.6, preventing the model from entering the highly desirable "performance inversion" (Unseen > Seen) regime.
+3. **Degeneration into a Rote-Memorization Hack:** The auxiliary classification head failed to act as an anchor for language topology. Instead, it served as a target for memorization, reverting the project from true open-world semantic generalization back into a classic rote-overfitting loop.
+
+---
 ## [v1.8.6] 2026-05-10 - Project Phantom: The Precision Sniper
 
 **Objective:** Enhance semantic discriminative power by forcing the model to distinguish between the most confusing negative samples (Hard Negative Mining).

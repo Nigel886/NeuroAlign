@@ -67,6 +67,7 @@ class EEGTransformerEncoder(nn.Module):
         dim_feedforward=2048,
         dropout=0.1,
         output_dim=4096,
+        vocab_size=None,
         num_subjects=None,
         subject_hidden_dim=256,
         content_dim=384,
@@ -92,6 +93,7 @@ class EEGTransformerEncoder(nn.Module):
         self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
         
         self.style_dim = int(style_dim)
+        self.vocab_size = int(vocab_size) if vocab_size is not None else None
 
         # 4. Dual-head projection
         # proj_semantic: (d_model -> 4096) for Llama-3 space
@@ -99,6 +101,7 @@ class EEGTransformerEncoder(nn.Module):
         self.proj_semantic = nn.Linear(d_model, output_dim)
         self.proj_style = nn.Linear(d_model, self.style_dim)
         self.centering = CenteringLayer(output_dim) if enable_centering else None
+        self.aux_decoder = nn.Linear(d_model, self.vocab_size) if self.vocab_size is not None else None
 
         self.subject_classifier = (
             nn.Sequential(
@@ -130,10 +133,13 @@ class EEGTransformerEncoder(nn.Module):
         self.input_projection.bias.data.zero_()
         self.input_projection.weight.data.uniform_(-initrange, initrange)
         
-        nn.init.xavier_uniform_(self.proj_semantic.weight)
+        nn.init.xavier_normal_(self.proj_semantic.weight)
         nn.init.constant_(self.proj_semantic.bias, 0)
         nn.init.xavier_normal_(self.proj_style.weight)
         nn.init.constant_(self.proj_style.bias, 0)
+        if self.aux_decoder is not None:
+            nn.init.xavier_normal_(self.aux_decoder.weight)
+            nn.init.constant_(self.aux_decoder.bias, 0)
         if self.subject_classifier is not None:
             for m in self.subject_classifier:
                 if isinstance(m, nn.Linear):
@@ -145,6 +151,7 @@ class EEGTransformerEncoder(nn.Module):
         src,
         src_key_padding_mask=None,
         return_subject_logits=False,
+        return_aux_logits=False,
         grl_alpha=1.0,
         centering_delta=None,
         aug_mode=False,
@@ -172,6 +179,8 @@ class EEGTransformerEncoder(nn.Module):
         else:
             pooled_output = torch.mean(output, dim=1)
             
+        aux_logits = self.aux_decoder(pooled_output) if self.aux_decoder is not None else None
+
         z_semantic = self.proj_semantic(pooled_output)
         if self.centering is not None:
             z_semantic = self.centering(z_semantic, delta=centering_delta)
@@ -200,7 +209,12 @@ class EEGTransformerEncoder(nn.Module):
                 raise ValueError("Subject classifier is not enabled. Set num_subjects when constructing the model.")
             rev = ReverseLayerF.apply(z_style, grl_alpha)
             subject_logits = self.subject_classifier(rev)
+            if return_aux_logits:
+                return z_semantic, z_style, subject_logits, aux_logits
             return z_semantic, z_style, subject_logits
+
+        if return_aux_logits:
+            return z_semantic, z_style, aux_logits
 
         return z_semantic, z_style
 

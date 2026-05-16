@@ -1,0 +1,21 @@
+{
+  "checkpoint": "C:\\Users\\Nigel Yan\\Desktop\\Personal\\NeuroAlign\\checkpoints\\v1_8_6\\eeg_encoder_epoch_best.pth",
+  "checkpoint_version": null,
+  "data_path": "C:\\Users\\Nigel Yan\\Desktop\\Personal\\NeuroAlign\\data\\preprocessed",
+  "llm_name": "meta-llama/Meta-Llama-3-8B-Instruct",
+  "tokenizer_name": "meta-llama/Meta-Llama-3-8B-Instruct",
+  "batch_size": 4,
+  "test_subject_id": "ZAB",
+  "metrics": {
+    "num_samples": 3924,
+    "top1_all": 0.0889398604631424,
+    "top5_all": 0.4747706353664398,
+    "top1_unseen": 0.12882652878761292,
+    "top5_unseen": 0.543367326259613,
+    "unseen_subject_id": "ZAB",
+    "num_unseen": 784,
+    "top1_seen": 0.07898089289665222,
+    "top5_seen": 0.4576433002948761,
+    "num_seen": 3140
+  }
+}
