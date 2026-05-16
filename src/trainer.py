@@ -194,7 +194,7 @@ def train_one_epoch(
         optimizer.add_param_group({"params": new_params})
 
     ce_loss = nn.CrossEntropyLoss(ignore_index=-1).to(device)
-    aux_ce = nn.CrossEntropyLoss().to(device)
+    aux_mse = nn.MSELoss().to(device)
     subject_to_idx = _build_subject_mapping(dataloader)
     if getattr(model, "memory_bank", None) is None:
         model.memory_bank = MemoryBank(queue_size=1024, dim=int(getattr(llm.config, "hidden_size", 4096))).to(device)
@@ -226,6 +226,7 @@ def train_one_epoch(
             # Masked Mean Pooling for Text
             text_mask = attention_mask.unsqueeze(-1).float()
             text_features = torch.sum(last_hidden_state * text_mask, dim=1) / torch.sum(text_mask, dim=1).clamp(min=1e-9)
+        text_features_target = text_features.detach()
         
         denom = max(1, total_epochs * len(dataloader))
         current_step = (epoch - 1) * len(dataloader) + step
@@ -269,11 +270,11 @@ def train_one_epoch(
         # 2. 混合精度前向传播
         with autocast():
             if use_subject:
-                z_semantic, z_style, subject_logits, aux_logits = model(
+                z_semantic, z_style, subject_logits, aux_embed = model(
                     eeg,
                     src_key_padding_mask=src_key_padding_mask,
                     return_subject_logits=True,
-                    return_aux_logits=True,
+                    return_aux_embed=True,
                     grl_alpha=lambda_subject,
                     aug_mode=True,
                     subject_labels=subject_labels,
@@ -288,11 +289,11 @@ def train_one_epoch(
                     model.set_centering_delta(delta)
                 delta_noisy = _centroid_perturb(delta, ratio=0.05) if use_centering else None
                 if use_centering and delta_noisy is not None:
-                    z_semantic, z_style, subject_logits, aux_logits = model(
+                    z_semantic, z_style, subject_logits, aux_embed = model(
                         eeg,
                         src_key_padding_mask=src_key_padding_mask,
                         return_subject_logits=True,
-                        return_aux_logits=True,
+                        return_aux_embed=True,
                         grl_alpha=lambda_subject,
                         centering_delta=delta_noisy,
                         aug_mode=True,
@@ -317,21 +318,16 @@ def train_one_epoch(
                 cross = torch.matmul(z_sem.transpose(0, 1), z_sty) / float(z_sem.size(0))
                 ortho_loss = torch.mean(cross ** 2)
 
-                aux_gen_loss = None
-                if aux_logits is not None:
-                    seq_len = int(input_ids.size(1))
-                    lengths = attention_mask.to(dtype=torch.long).sum(dim=1).clamp(min=1)
-                    idx = (lengths - 1) // 2
-                    idx = idx.clamp(min=0, max=seq_len - 1)
-                    targets = input_ids[torch.arange(int(input_ids.size(0)), device=device), idx]
-                    aux_gen_loss = aux_ce(aux_logits.to(dtype=torch.float32), targets)
+                aux_loss = aux_mse(
+                    aux_embed.to(dtype=torch.float32),
+                    text_features_target.to(dtype=torch.float32),
+                )
 
                 dann_loss = lambda_subject * subject_loss
                 loss = alignment_loss + dann_loss + 0.1 * ortho_loss
-                if aux_gen_loss is not None:
-                    loss = loss + 0.1 * aux_gen_loss
+                loss = loss + 0.1 * aux_loss
             else:
-                z_semantic, z_style, aux_logits = model(eeg, src_key_padding_mask=src_key_padding_mask, return_aux_logits=True)
+                z_semantic, z_style, aux_embed = model(eeg, src_key_padding_mask=src_key_padding_mask, return_aux_embed=True)
                 z_semantic = F.normalize(z_semantic.to(dtype=torch.float32), p=2, dim=-1).to(dtype=z_semantic.dtype)
                 text_features = F.normalize(text_features.to(dtype=torch.float32), p=2, dim=-1).to(dtype=text_features.dtype)
                 if getattr(model, "centroid_tracker", None) is None:
@@ -342,11 +338,11 @@ def train_one_epoch(
                     model.set_centering_delta(delta)
                 delta_noisy = _centroid_perturb(delta, ratio=0.05) if use_centering else None
                 if use_centering and delta_noisy is not None:
-                    z_semantic, z_style, aux_logits = model(
+                    z_semantic, z_style, aux_embed = model(
                         eeg,
                         src_key_padding_mask=src_key_padding_mask,
                         centering_delta=delta_noisy,
-                        return_aux_logits=True,
+                        return_aux_embed=True,
                     )
                     z_semantic = F.normalize(z_semantic.to(dtype=torch.float32), p=2, dim=-1).to(dtype=z_semantic.dtype)
                 text_bank = torch.cat([text_features, model.memory_bank.queue.detach().to(device=device, dtype=text_features.dtype)], dim=0)
@@ -358,17 +354,12 @@ def train_one_epoch(
                 z_sty = F.normalize(z_style.to(dtype=torch.float32), p=2, dim=-1)
                 cross = torch.matmul(z_sem.transpose(0, 1), z_sty) / float(z_sem.size(0))
                 ortho_loss = torch.mean(cross ** 2)
-                aux_gen_loss = None
-                if aux_logits is not None:
-                    seq_len = int(input_ids.size(1))
-                    lengths = attention_mask.to(dtype=torch.long).sum(dim=1).clamp(min=1)
-                    idx = (lengths - 1) // 2
-                    idx = idx.clamp(min=0, max=seq_len - 1)
-                    targets = input_ids[torch.arange(int(input_ids.size(0)), device=device), idx]
-                    aux_gen_loss = aux_ce(aux_logits.to(dtype=torch.float32), targets)
+                aux_loss = aux_mse(
+                    aux_embed.to(dtype=torch.float32),
+                    text_features_target.to(dtype=torch.float32),
+                )
                 loss = alignment_loss + 0.1 * ortho_loss
-                if aux_gen_loss is not None:
-                    loss = loss + 0.1 * aux_gen_loss
+                loss = loss + 0.1 * aux_loss
 
             unscaled_loss = loss
             loss = loss / accumulation_steps

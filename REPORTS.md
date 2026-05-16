@@ -4,6 +4,26 @@ This document tracks the iterative development of the NeuroAlign framework, focu
 
 ---
 
+## [v2.0_beta] 2026-05-16 - Project Phantom: The Continuous Manifold Lock
+
+**Objective:** Mitigate the shortcut learning of v2.0_alpha by replacing discrete token classification with a continuous space MSE regression head mapping to Llama-3's 4096d hidden space, while restoring default initializations.
+
+### 📊 Performance Comparison (v1.8.6 vs. v2.0_beta):
+
+| Metric | v1.8.6 (The Miracle) | v2.0_alpha (Discrete) | v2.0_beta (Continuous) | Status |
+| :--- | :--- | :--- | :--- | :--- |
+| **Seen Top-1 Accuracy** | 7.90% | **8.54%** | **8.25%** | ⚠️ Overtraining |
+| **Unseen Top-1 (ZAB)** | **12.88%** | **0.00%** | **0.00%** | ❌ **Frozen** |
+| **Unseen Top-5 (ZAB)** | **54.34%** | **0.26%** | **0.13%** | ❌ **Frozen** |
+| **Auxiliary Loss Target** | None | CrossEntropy (128k) | **MSE Regression (4096d)** | ✅ Smooth but over-constrained |
+
+### 🔍 Technical Diagnosis:
+1. **The Over-Constrained Subspace:** Even though MSE is softer than CrossEntropy, forcing the 4-layer Transformer to simultaneously align modalities (Contrastive Loss) and reconstruct high-dimensional Llama-3 embeddings (MSE Loss) limits its geometric degrees of freedom. The encoder minimizes the combined loss by shrinking its latent space into a rigid subspace optimized exclusively for the 4 seen subjects.
+2. **The Fragility of the v1.8.6 Equilibrium:** The 12.88% generalization in v1.8.6 was driven purely by the contrastive gradient's freedom to tilt the entire EEG manifold toward the text space. Introducing *any* auxiliary coordinate-bound reconstruction target anchors the manifold too tight, destroying this delicate alignment topology.
+3. **Subject-Invariant Suppression:** t-SNE analysis reveals that while the clusters look stable, the unseen subject's distribution is forcefully projected into a separate, unaligned pocket of the 4096d space, rendering zero-shot retrieval impossible.
+
+---
+
 ## [v2.0_alpha] 2026-05-16 - Project Phantom: The Semantic Hash Trap
 
 **Objective:** Solidify the 4-layer Transformer golden baseline from v1.8.6 and introduce a discrete token prediction head (128k vocab classification) as a semantic anchor to force the encoder to preserve fine-grained details, aiming to shatter the 12.88% bottleneck.

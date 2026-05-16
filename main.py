@@ -51,7 +51,7 @@ def main(args):
         nhead=8, 
         num_layers=4, 
         output_dim=target_dim,
-        vocab_size=int(getattr(llm.config, "vocab_size", 0)) or None,
+        target_embed_dim=int(getattr(llm.config, "hidden_size", 4096)),
         num_subjects=num_subjects,
         subject_hidden_dim=args.subject_hidden_dim,
         enable_centering=args.use_centering,
