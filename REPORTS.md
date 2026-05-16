@@ -3,6 +3,27 @@
 This document tracks the iterative development of the NeuroAlign framework, focusing on the alignment between EEG signals and LLM semantic embeddings.
 
 ---
+
+## [v1.8.6_test_ZPH] 2026-05-16 - Project Phantom: The Subject-Asymmetry Barrier
+
+**Objective:** Validate the cross-subject universality of the v1.8.6 architecture by switching the unseen validation target from ZAB to ZPH under strict LOSO rules.
+
+### 📊 Performance Comparison (v1.8.6_ZAB vs. v1.8.6_ZPH):
+
+| Metric | v1.8.6 (Unseen = ZAB) | v1.8.6 (Unseen = ZPH) | Status |
+| :--- | :--- | :--- | :--- |
+| **Seen Top-1 Accuracy** | 7.90% | **11.31%** | 📈 Exploded (Domain Dominance) |
+| **Seen Top-5 Accuracy** | 45.76% | **48.22%** | 📈 Overfitted to training pool |
+| **Unseen Top-1 Accuracy** | **12.88% (SOTA)** | **0.00%** | ❌ **Total Collapse** |
+| **Unseen Top-5 Accuracy** | **54.34%** | **0.13%** | ❌ **Total Collapse** |
+| **Training Subjects** | ZPH, ZMG, ZKH, ZKW | **ZAB, ZMG, ZKH, ZKW** | ⚠️ ZAB presence altered alignment |
+
+### 🔍 Technical Diagnosis:
+1. **ZAB's Domain Dominance:** When ZAB shifts from the testing pool into the training pool, its neural data introduces an overwhelming signal-to-noise ratio or dominant geometric variance. The 4-layer encoder paths the easiest gradient route by aligning text heavily with ZAB's unique distribution, boosting Seen accuracy to a record-high 11.31%, but creating an impenetrable wall for ZPH.
+2. **Extreme Cross-Subject Non-Stationarity:** The contrastive manifold learned under the 1.2x static HNM is highly non-rigid. It proves that the "miracle alignment" is not an invariant neural-to-text dictionary, but a delicate spatial balancing act that breaks down when the training subject cluster is altered.
+3. **The Necessity of Explicit Disentanglement:** Relying solely on raw contrastive push-and-pull (HNM) is insufficient to neutralize individual physiological fingerprints when a dominant subject enters the training set.
+
+---
 ## [v1.8.6] 2026-05-10 - Project Phantom: The Precision Sniper
 
 **Objective:** Enhance semantic discriminative power by forcing the model to distinguish between the most confusing negative samples (Hard Negative Mining).
