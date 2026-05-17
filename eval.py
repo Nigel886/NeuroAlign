@@ -99,7 +99,7 @@ def sinkhorn_alignment(unseen_features, seen_features, reg=0.05, max_iter=100):
     transformed_features = torch.mm(P, seen_features) * N_u
     return transformed_features
     
-def run_retrieval_eval(model, llm, dataloader, device, test_subject_id=None, tta_mode="none"):
+def run_retrieval_eval(model, llm, dataloader, device, test_subject_id=None, tta_mode="none", reg=0.05):
     model.eval()
     llm.eval()
     
@@ -153,7 +153,7 @@ def run_retrieval_eval(model, llm, dataloader, device, test_subject_id=None, tta
             ot_device = device
             unseen_eeg = all_eeg_features[unseen_mask].to(device=ot_device)
             seen_eeg = all_eeg_features[seen_mask].to(device=ot_device)
-            calibrated_unseen = sinkhorn_alignment(unseen_eeg, seen_eeg, reg=0.05, max_iter=100)
+            calibrated_unseen = sinkhorn_alignment(unseen_eeg, seen_eeg, reg=float(reg), max_iter=100)
             all_eeg_features[unseen_mask] = F.normalize(calibrated_unseen.to(device="cpu", dtype=torch.float32), p=2, dim=-1)
     
     # 计算相似度矩阵 (N, N)
@@ -313,6 +313,7 @@ def main():
     parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--test_subject_id", type=str, default=None)
     parser.add_argument("--tta_mode", type=str, default="none", choices=["none", "v3_1_ot"])
+    parser.add_argument("--reg", type=float, default=0.05)
     parser.add_argument("--output_prefix", type=str, default="tsne")
     parser.add_argument("--out_dir", type=str, default=None)
     args = parser.parse_args()
@@ -350,7 +351,7 @@ def main():
     print(f"\nOutputs will be saved to: {output_dir}")
 
     eeg_feats, text_feats, subject_ids, metrics = run_retrieval_eval(
-        model, llm, dataloader, device, test_subject_id=args.test_subject_id, tta_mode=args.tta_mode
+        model, llm, dataloader, device, test_subject_id=args.test_subject_id, tta_mode=args.tta_mode, reg=args.reg
     )
     metrics_payload = {
         "checkpoint": os.path.abspath(args.checkpoint),
