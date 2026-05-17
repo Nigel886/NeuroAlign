@@ -110,7 +110,19 @@ def configure_tent_model(model):
             m.train()
     return model
     
-def run_retrieval_eval(model, llm, dataloader, device, test_subject_id=None, tta_mode="none", reg=0.05, lr_tta=1e-5):
+def run_retrieval_eval(
+    model,
+    llm,
+    dataloader,
+    device,
+    test_subject_id=None,
+    tta_mode="none",
+    reg=0.05,
+    lr_tta=1e-5,
+    lambda_anchor=1.0,
+    lambda_elastic=10.0,
+    train_text_centroid=None,
+):
     model.eval()
     llm.eval()
     
@@ -119,7 +131,95 @@ def run_retrieval_eval(model, llm, dataloader, device, test_subject_id=None, tta
     all_subject_ids = []
     
     print("Extracting embeddings for retrieval...")
-    if str(tta_mode).lower() in {"v4_0_tent", "tent"}:
+    if str(tta_mode).lower() in {"v5_0_sga", "sga"}:
+        if test_subject_id is None:
+            raise ValueError("--tta_mode v5_0_sga requires --test_subject_id to define the unseen subject.")
+        test_subject_id = str(test_subject_id).upper()
+        if train_text_centroid is None:
+            raise ValueError("v5_0_sga requires train_text_centroid loaded from checkpoint (centroid_tracker.text_centroid).")
+        train_text_centroid = train_text_centroid.to(device=device, dtype=torch.float32)
+
+        with torch.no_grad():
+            for batch in tqdm(dataloader):
+                input_ids = batch["input_ids"].to(device)
+                attention_mask = batch["attention_mask"].to(device)
+                outputs = llm(input_ids=input_ids, attention_mask=attention_mask, output_hidden_states=True)
+                last_hidden_state = outputs.hidden_states[-1]
+                text_mask = attention_mask.unsqueeze(-1).float()
+                text_feat = torch.sum(last_hidden_state * text_mask, dim=1) / torch.sum(text_mask, dim=1).clamp(min=1e-9)
+                text_feat = F.normalize(text_feat, p=2, dim=-1)
+                all_text_features.append(text_feat.detach().to(dtype=torch.float32).cpu())
+                all_subject_ids.extend(batch.get("subject_ids", [None] * int(text_feat.size(0))))
+        all_text_features = torch.cat(all_text_features, dim=0)
+        all_text_features = F.normalize(all_text_features.to(dtype=torch.float32), p=2, dim=-1)
+        text_bank = all_text_features.to(device=device, dtype=torch.float32)
+
+        sga_model = configure_tent_model(copy.deepcopy(model).to(device))
+        init_ln_params = {name: p.clone().detach() for name, p in sga_model.named_parameters() if "layer_norm" in name.lower()}
+        if not init_ln_params:
+            for module_name, m in sga_model.named_modules():
+                if isinstance(m, torch.nn.LayerNorm):
+                    for p_name, p in m.named_parameters(recurse=False):
+                        full = f"{module_name}.{p_name}" if module_name else p_name
+                        init_ln_params[full] = p.clone().detach()
+        init_ln_params = {k: v.to(device=device, dtype=torch.float32) for k, v in init_ln_params.items()}
+
+        sga_params = [p for p in sga_model.parameters() if p.requires_grad]
+        if not sga_params:
+            raise ValueError("No trainable LayerNorm parameters found for v5_0_sga.")
+        optimizer = torch.optim.Adam(sga_params, lr=float(lr_tta))
+
+        for _ in range(1):
+            for batch in tqdm(dataloader, desc="SGA"):
+                eeg = batch["eeg"].to(device)
+                eeg_mask = batch["eeg_mask"].to(device)
+                subject_ids = batch.get("subject_ids", [None] * int(eeg.size(0)))
+                subj = np.array([str(s).upper() if s is not None else "UNK" for s in subject_ids], dtype=object)
+                unseen_mask_batch = subj == test_subject_id
+                if not unseen_mask_batch.any():
+                    continue
+                idx = torch.from_numpy(np.where(unseen_mask_batch)[0]).long().to(device)
+                eeg_u = eeg.index_select(0, idx)
+                eeg_mask_u = eeg_mask.index_select(0, idx)
+
+                src_key_padding_mask = (eeg_mask_u == 0)
+                eeg_features = sga_model(eeg_u, src_key_padding_mask=src_key_padding_mask)
+                eeg_features = F.normalize(eeg_features.to(dtype=torch.float32), p=2, dim=-1)
+
+                logits = torch.mm(eeg_features, text_bank.t())
+                p = F.softmax(logits / 0.05, dim=-1)
+                loss_entropy = -torch.sum(p * torch.log(p + 1e-9), dim=-1).mean()
+
+                current_unseen_centroid = eeg_features.mean(dim=0)
+                loss_anchor = 1.0 - F.cosine_similarity(
+                    current_unseen_centroid.unsqueeze(0),
+                    train_text_centroid.unsqueeze(0),
+                ).mean()
+
+                loss_elastic = 0.0
+                for name, p_ln in sga_model.named_parameters():
+                    if name in init_ln_params:
+                        loss_elastic = loss_elastic + torch.sum((p_ln.to(dtype=torch.float32) - init_ln_params[name]) ** 2)
+
+                loss_total = loss_entropy + float(lambda_anchor) * loss_anchor + float(lambda_elastic) * loss_elastic
+                optimizer.zero_grad()
+                loss_total.backward()
+                optimizer.step()
+
+        sga_model.eval()
+        all_eeg_features = []
+        with torch.no_grad():
+            for batch in tqdm(dataloader, desc="Extracting EEG (SGA)"):
+                eeg = batch["eeg"].to(device)
+                eeg_mask = batch["eeg_mask"].to(device)
+                src_key_padding_mask = (eeg_mask == 0)
+                z_semantic = sga_model(eeg, src_key_padding_mask=src_key_padding_mask)
+                eeg_feat = F.normalize(z_semantic.detach().to(dtype=torch.float32), p=2, dim=-1)
+                all_eeg_features.append(eeg_feat.cpu())
+        all_eeg_features = torch.cat(all_eeg_features, dim=0)
+        all_eeg_features = F.normalize(all_eeg_features.to(dtype=torch.float32), p=2, dim=-1)
+
+    elif str(tta_mode).lower() in {"v4_0_tent", "tent"}:
         if test_subject_id is None:
             raise ValueError("--tta_mode v4_0_tent requires --test_subject_id to define the unseen subject.")
         test_subject_id = str(test_subject_id).upper()
@@ -385,9 +485,11 @@ def main():
     parser.add_argument("--tokenizer_name", type=str, default="meta-llama/Meta-Llama-3-8B-Instruct")
     parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--test_subject_id", type=str, default=None)
-    parser.add_argument("--tta_mode", type=str, default="none", choices=["none", "v3_1_ot", "v4_0_tent"])
+    parser.add_argument("--tta_mode", type=str, default="none", choices=["none", "v3_1_ot", "v4_0_tent", "v5_0_sga"])
     parser.add_argument("--lr_tta", type=float, default=1e-5)
     parser.add_argument("--reg", type=float, default=0.05)
+    parser.add_argument("--lambda_anchor", type=float, default=1.0)
+    parser.add_argument("--lambda_elastic", type=float, default=10.0)
     parser.add_argument("--output_prefix", type=str, default="tsne")
     parser.add_argument("--out_dir", type=str, default=None)
     args = parser.parse_args()
@@ -412,6 +514,11 @@ def main():
     else:
         print(f"Warning: checkpoint not found: {args.checkpoint}. Running evaluation with random weights.")
 
+    state_dict = state.get("state_dict", state) if isinstance(state, dict) else None
+    train_text_centroid = None
+    if isinstance(state_dict, dict) and "centroid_tracker.text_centroid" in state_dict:
+        train_text_centroid = state_dict["centroid_tracker.text_centroid"].detach().to(dtype=torch.float32, device=device)
+
     dataloader = get_dataloader(
         args.data_path,
         args.tokenizer_name,
@@ -433,6 +540,9 @@ def main():
         tta_mode=args.tta_mode,
         reg=args.reg,
         lr_tta=args.lr_tta,
+        lambda_anchor=args.lambda_anchor,
+        lambda_elastic=args.lambda_elastic,
+        train_text_centroid=train_text_centroid,
     )
     metrics_payload = {
         "checkpoint": os.path.abspath(args.checkpoint),
