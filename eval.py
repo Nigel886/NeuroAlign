@@ -52,7 +52,54 @@ def _compute_topk(similarity, k, query_indices):
     topk = (indices[q] == labels[q].view(-1, 1)).any(dim=1).float().mean().item()
     return top1, topk
 
-def run_retrieval_eval(model, llm, dataloader, device, test_subject_id=None):
+def sinkhorn_alignment(unseen_features, seen_features, reg=0.05, max_iter=100):
+    norm_u = F.normalize(unseen_features, p=2, dim=-1)
+    norm_s = F.normalize(seen_features, p=2, dim=-1)
+    C = 1.0 - torch.mm(norm_u, norm_s.t())
+
+    K = torch.exp(-C / float(reg))
+    N_u, N_s = K.shape
+    u = torch.ones(N_u, device=K.device, dtype=K.dtype) / float(N_u)
+    v = torch.ones(N_s, device=K.device, dtype=K.dtype) / float(N_s)
+    eps = torch.finfo(K.dtype).eps
+
+    for _ in range(int(max_iter)):
+        Kv = torch.mv(K, v).clamp(min=eps)
+        u = (1.0 / float(N_u)) / Kv
+        Ktu = torch.mv(K.t(), u).clamp(min=eps)
+        v = (1.0 / float(N_s)) / Ktu
+
+    P = u.unsqueeze(1) * K * v.unsqueeze(0)
+    transformed_features = torch.mm(P, seen_features) * float(N_u)
+    return transformed_features
+
+def sinkhorn_alignment(unseen_features, seen_features, reg=0.05, max_iter=100):
+    """
+    v3.1 最优传输(OT)测试时自适应校准核心
+    利用无监督 Sinkhorn 算法，强行将未见域的扭曲流形非线性揉捏、贴合到已知域的完美拓扑上
+    """
+    device = unseen_features.device
+    # 1. 计算两组特征之间的余弦距离代价矩阵 C [N_unseen, N_seen]
+    norm_u = F.normalize(unseen_features, p=2, dim=-1)
+    norm_s = F.normalize(seen_features, p=2, dim=-1)
+    C = 1.0 - torch.mm(norm_u, norm_s.t()) 
+    
+    # 2. Sinkhorn 迭代平衡
+    K = torch.exp(-C / reg)
+    N_u, N_s = K.shape
+    u = torch.ones(N_u, device=device) / N_u
+    v = torch.ones(N_s, device=device) / N_s
+    
+    for _ in range(max_iter):
+        u = (1.0 / N_u) / torch.clamp(torch.mv(K, v), min=1e-9)
+        v = (1.0 / N_s) / torch.clamp(torch.mv(K.t(), u), min=1e-9)
+        
+    # 3. 计算传输矩阵 P 并通过重心投影重塑未见域特征
+    P = u.unsqueeze(1) * K * v.unsqueeze(0) 
+    transformed_features = torch.mm(P, seen_features) * N_u
+    return transformed_features
+    
+def run_retrieval_eval(model, llm, dataloader, device, test_subject_id=None, tta_mode="none"):
     model.eval()
     llm.eval()
     
@@ -89,6 +136,25 @@ def run_retrieval_eval(model, llm, dataloader, device, test_subject_id=None):
     all_text_features = torch.cat(all_text_features, dim=0)
     all_eeg_features = F.normalize(all_eeg_features.to(dtype=torch.float32), p=2, dim=-1)
     all_text_features = F.normalize(all_text_features.to(dtype=torch.float32), p=2, dim=-1)
+
+    test_subject_id = str(test_subject_id).upper() if test_subject_id is not None else None
+    subj = None
+    unseen_mask = None
+    seen_mask = None
+    if test_subject_id and any(s is not None for s in all_subject_ids):
+        subj = np.array([str(s).upper() if s is not None else "UNK" for s in all_subject_ids], dtype=object)
+        unseen_mask = subj == test_subject_id
+        seen_mask = ~unseen_mask
+
+    if str(tta_mode).lower() in {"v3_1_ot", "ot"}:
+        if unseen_mask is None:
+            raise ValueError("--tta_mode v3_1_ot requires --test_subject_id and subject_ids in the dataset.")
+        if unseen_mask.any() and seen_mask.any():
+            ot_device = device
+            unseen_eeg = all_eeg_features[unseen_mask].to(device=ot_device)
+            seen_eeg = all_eeg_features[seen_mask].to(device=ot_device)
+            calibrated_unseen = sinkhorn_alignment(unseen_eeg, seen_eeg, reg=0.05, max_iter=100)
+            all_eeg_features[unseen_mask] = F.normalize(calibrated_unseen.to(device="cpu", dtype=torch.float32), p=2, dim=-1)
     
     # 计算相似度矩阵 (N, N)
     similarity = torch.matmul(all_eeg_features, all_text_features.t())
@@ -105,11 +171,7 @@ def run_retrieval_eval(model, llm, dataloader, device, test_subject_id=None):
         "top5_all": float(top5_all),
     }
 
-    test_subject_id = str(test_subject_id).upper() if test_subject_id is not None else None
-    if test_subject_id and any(s is not None for s in all_subject_ids):
-        subj = np.array([str(s).upper() if s is not None else "UNK" for s in all_subject_ids], dtype=object)
-        unseen_mask = subj == test_subject_id
-        seen_mask = ~unseen_mask
+    if test_subject_id and subj is not None and unseen_mask is not None and seen_mask is not None:
         if unseen_mask.any():
             unseen_idx = torch.from_numpy(np.where(unseen_mask)[0]).long()
             top1_u, top5_u = _compute_topk(similarity, 5, unseen_idx)
@@ -250,7 +312,7 @@ def main():
     parser.add_argument("--tokenizer_name", type=str, default="meta-llama/Meta-Llama-3-8B-Instruct")
     parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--test_subject_id", type=str, default=None)
-    parser.add_argument("--tta_mode", type=str, default="none", choices=["none", "v3_0"])
+    parser.add_argument("--tta_mode", type=str, default="none", choices=["none", "v3_1_ot"])
     parser.add_argument("--output_prefix", type=str, default="tsne")
     parser.add_argument("--out_dir", type=str, default=None)
     args = parser.parse_args()
@@ -288,57 +350,8 @@ def main():
     print(f"\nOutputs will be saved to: {output_dir}")
 
     eeg_feats, text_feats, subject_ids, metrics = run_retrieval_eval(
-        model, llm, dataloader, device, test_subject_id=args.test_subject_id
+        model, llm, dataloader, device, test_subject_id=args.test_subject_id, tta_mode=args.tta_mode
     )
-    if args.tta_mode == "v3_0":
-        if not args.test_subject_id:
-            raise ValueError("--tta_mode v3_0 requires --test_subject_id to define the unseen subject.")
-        if not isinstance(state, dict):
-            raise ValueError("Checkpoint not loaded. v3_0 requires a checkpoint with centroid_tracker.text_centroid.")
-        state_dict = state.get("state_dict", state)
-        if not isinstance(state_dict, dict) or "centroid_tracker.text_centroid" not in state_dict:
-            raise ValueError("Missing centroid_tracker.text_centroid in checkpoint. Ensure training saved CentroidTracker buffers.")
-        train_text_centroid = state_dict["centroid_tracker.text_centroid"].to(dtype=torch.float32)
-        train_text_centroid = train_text_centroid.to(device="cpu")
-        subj = np.array([str(s).upper() if s is not None else "UNK" for s in subject_ids], dtype=object)
-        unseen_mask_np = subj == str(args.test_subject_id).upper()
-        if unseen_mask_np.any():
-            unseen_idx = torch.from_numpy(np.where(unseen_mask_np)[0]).long()
-            eeg_t = torch.from_numpy(eeg_feats).to(dtype=torch.float32)
-            unseen_eeg_centroid = eeg_t[unseen_idx].mean(dim=0)
-            eeg_t[unseen_idx] = F.normalize(
-                eeg_t[unseen_idx] - unseen_eeg_centroid + train_text_centroid,
-                p=2,
-                dim=-1,
-            )
-            eeg_feats = eeg_t.numpy()
-        else:
-            print(f"Warning: No samples found for unseen subject_id={str(args.test_subject_id).upper()}. Skipping v3_0 adaptation.")
-        eeg_feats_t = torch.from_numpy(eeg_feats).to(dtype=torch.float32)
-        text_feats_t = torch.from_numpy(text_feats).to(dtype=torch.float32)
-        similarity = torch.matmul(F.normalize(eeg_feats_t, p=2, dim=-1), F.normalize(text_feats_t, p=2, dim=-1).t())
-        num_samples = similarity.size(0)
-        all_idx = torch.arange(num_samples, device=similarity.device)
-        top1_all, top5_all = _compute_topk(similarity, 5, all_idx)
-        metrics["top1_all"] = float(top1_all)
-        metrics["top5_all"] = float(top5_all)
-        test_subject = str(args.test_subject_id).upper()
-        subj = np.array([str(s).upper() if s is not None else "UNK" for s in subject_ids], dtype=object)
-        unseen_mask = subj == test_subject
-        if unseen_mask.any():
-            unseen_idx = torch.from_numpy(np.where(unseen_mask)[0]).long()
-            top1_u, top5_u = _compute_topk(similarity, 5, unseen_idx)
-            metrics["top1_unseen"] = float(top1_u)
-            metrics["top5_unseen"] = float(top5_u)
-            metrics["unseen_subject_id"] = str(test_subject)
-            metrics["num_unseen"] = int(unseen_idx.numel())
-        seen_mask = ~unseen_mask
-        if seen_mask.any():
-            seen_idx = torch.from_numpy(np.where(seen_mask)[0]).long()
-            top1_s, top5_s = _compute_topk(similarity, 5, seen_idx)
-            metrics["top1_seen"] = float(top1_s)
-            metrics["top5_seen"] = float(top5_s)
-            metrics["num_seen"] = int(seen_idx.numel())
     metrics_payload = {
         "checkpoint": os.path.abspath(args.checkpoint),
         "checkpoint_version": _infer_version_tag_from_checkpoint_path(args.checkpoint),
