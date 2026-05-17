@@ -189,8 +189,6 @@ def train_one_epoch(
             window_count = 0
             window_loss_sum = 0.0
             window_align_sum = 0.0
-            window_subj_sum = 0.0
-            window_ortho_sum = 0.0
         # 将数据移至设备
         input_ids = batch['input_ids'].to(device)
         attention_mask = batch['attention_mask'].to(device)
@@ -210,24 +208,10 @@ def train_one_epoch(
             # Masked Mean Pooling for Text
             text_mask = attention_mask.unsqueeze(-1).float()
             text_features = torch.sum(last_hidden_state * text_mask, dim=1) / torch.sum(text_mask, dim=1).clamp(min=1e-9)
-        text_features_target = text_features.detach()
         
-        denom = max(1, total_epochs * len(dataloader))
-        current_step = (epoch - 1) * len(dataloader) + step
-        progress = current_step / denom
-        def _centroid_perturb(delta, ratio=0.05):
-            if delta is None or not torch.is_tensor(delta):
-                return None
-            d = delta.detach().to(dtype=torch.float32)
-            std = float(d.std().item())
-            if not math.isfinite(std) or std <= 0.0:
-                return delta
-            noise = torch.randn_like(delta) * (float(ratio) * std)
-            return delta + noise
-
         # 2. 混合精度前向传播
         with autocast():
-            z_semantic, z_style = model(eeg, src_key_padding_mask=src_key_padding_mask)
+            z_semantic = model(eeg, src_key_padding_mask=src_key_padding_mask)
             z_semantic = F.normalize(z_semantic.to(dtype=torch.float32), p=2, dim=-1).to(dtype=z_semantic.dtype)
             text_features = F.normalize(text_features.to(dtype=torch.float32), p=2, dim=-1).to(dtype=text_features.dtype)
             if getattr(model, "centroid_tracker", None) is None:
@@ -236,26 +220,13 @@ def train_one_epoch(
             delta = model.centroid_tracker.delta().to(device=device, dtype=z_semantic.dtype)
             if use_centering and hasattr(model, "set_centering_delta"):
                 model.set_centering_delta(delta)
-            delta_noisy = _centroid_perturb(delta, ratio=0.05) if use_centering else None
-            if use_centering and delta_noisy is not None:
-                z_semantic, z_style = model(
-                    eeg,
-                    src_key_padding_mask=src_key_padding_mask,
-                    centering_delta=delta_noisy,
-                )
-                z_semantic = F.normalize(z_semantic.to(dtype=torch.float32), p=2, dim=-1).to(dtype=z_semantic.dtype)
             text_bank = torch.cat([text_features, model.memory_bank.queue.detach().to(device=device, dtype=text_features.dtype)], dim=0)
             labels = torch.arange(z_semantic.size(0), device=device)
             alignment_loss = criterion.forward_eeg_to_text_bank(z_semantic, text_bank, labels=labels) * alignment_weight
             total_align += float(alignment_loss.detach().item())
             if epoch == 1 and step == 0:
                 print(f"DEBUG - Batch Align Loss: {alignment_loss.item()}")
-            ortho_dim = int(min(z_semantic.size(-1), z_style.size(-1)))
-            z_sem_ortho = z_semantic[..., :ortho_dim].to(dtype=torch.float32)
-            z_sty_ortho = z_style[..., :ortho_dim].to(dtype=torch.float32)
-            ortho_loss = torch.mean(torch.abs(F.cosine_similarity(z_sem_ortho, z_sty_ortho, dim=-1)))
-            loss = alignment_loss + 0.5 * ortho_loss
-            subject_loss = None
+            loss = alignment_loss
 
             unscaled_loss = loss
             loss = loss / accumulation_steps
@@ -274,10 +245,6 @@ def train_one_epoch(
         window_count += 1
         window_loss_sum += float(unscaled_loss.detach().item())
         window_align_sum += float((alignment_loss.detach().item() / alignment_weight) if alignment_weight != 0 else alignment_loss.detach().item())
-        if subject_loss is not None:
-            window_subj_sum += float(subject_loss.detach().item())
-        if ortho_loss is not None:
-            window_ortho_sum += float(ortho_loss.detach().item())
 
         total_loss += float(unscaled_loss.detach().item())
         model.memory_bank.enqueue(text_features)
@@ -285,9 +252,6 @@ def train_one_epoch(
             "loss": window_loss_sum / max(1, window_count),
         }
         postfix["align"] = window_align_sum / max(1, window_count)
-        if subject_loss is not None:
-            postfix["subj"] = window_subj_sum / max(1, window_count)
-        postfix["ortho"] = window_ortho_sum / max(1, window_count)
         pbar.set_postfix(postfix)
         
     denom_batches = max(1, len(dataloader))

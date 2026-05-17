@@ -22,10 +22,13 @@ class _CentroidTracker(torch.nn.Module):
 def _infer_centroid_dim_from_state(state_dict):
     if not isinstance(state_dict, dict):
         return None
-    v = state_dict.get("centroid_tracker.eeg_centroid", None)
+    sd = state_dict.get("state_dict", state_dict) if isinstance(state_dict, dict) else None
+    if not isinstance(sd, dict):
+        return None
+    v = sd.get("centroid_tracker.eeg_centroid", None)
     if v is not None and hasattr(v, "shape") and len(v.shape) == 1:
         return int(v.shape[0])
-    v = state_dict.get("centroid_tracker.text_centroid", None)
+    v = sd.get("centroid_tracker.text_centroid", None)
     if v is not None and hasattr(v, "shape") and len(v.shape) == 1:
         return int(v.shape[0])
     return None
@@ -59,15 +62,6 @@ def run_retrieval_eval(model, llm, dataloader, device, test_subject_id=None):
     
     print("Extracting embeddings for retrieval...")
     with torch.no_grad():
-        tracker = getattr(model, "centroid_tracker", None)
-        delta = None
-        centering = getattr(model, "centering", None)
-        if centering is not None and hasattr(centering, "delta"):
-            if torch.is_tensor(centering.delta) and centering.delta.numel() > 0:
-                delta = centering.delta.to(device=device, dtype=torch.float32)
-        if tracker is not None and hasattr(tracker, "text_centroid") and hasattr(tracker, "eeg_centroid"):
-            if delta is None:
-                delta = (tracker.text_centroid - tracker.eeg_centroid).to(device=device, dtype=torch.float32)
         for batch in tqdm(dataloader):
             input_ids = batch['input_ids'].to(device)
             attention_mask = batch['attention_mask'].to(device)
@@ -76,13 +70,8 @@ def run_retrieval_eval(model, llm, dataloader, device, test_subject_id=None):
             
             # 1. EEG 嵌入提取
             src_key_padding_mask = (eeg_mask == 0)
-            if delta is not None and getattr(model, "centering", None) is not None:
-                z_semantic, _ = model(eeg, src_key_padding_mask=src_key_padding_mask, centering_delta=delta)
-            else:
-                z_semantic, _ = model(eeg, src_key_padding_mask=src_key_padding_mask)
+            z_semantic = model(eeg, src_key_padding_mask=src_key_padding_mask)
             eeg_feat = z_semantic.detach().to(dtype=torch.float32)
-            if delta is not None and getattr(model, "centering", None) is None:
-                eeg_feat = eeg_feat + delta
             eeg_feat = F.normalize(eeg_feat, p=2, dim=-1)
             
             # 2. Text 嵌入提取 (LLM)
@@ -100,30 +89,6 @@ def run_retrieval_eval(model, llm, dataloader, device, test_subject_id=None):
     all_text_features = torch.cat(all_text_features, dim=0)
     all_eeg_features = F.normalize(all_eeg_features.to(dtype=torch.float32), p=2, dim=-1)
     all_text_features = F.normalize(all_text_features.to(dtype=torch.float32), p=2, dim=-1)
-
-    test_subject = str(test_subject_id).upper() if test_subject_id is not None else None
-    if test_subject and any(s is not None for s in all_subject_ids):
-        subj = np.array([str(s).upper() if s is not None else "UNK" for s in all_subject_ids], dtype=object)
-        unseen_mask = subj == test_subject
-        if unseen_mask.any():
-            eeg_centroid_test = all_eeg_features[unseen_mask].to(dtype=torch.float32).mean(dim=0)
-            text_centroid_test = all_text_features[unseen_mask].to(dtype=torch.float32).mean(dim=0)
-            delta_test = text_centroid_test - eeg_centroid_test
-            all_eeg_features[unseen_mask] = F.normalize(
-                all_eeg_features[unseen_mask].to(dtype=torch.float32) + delta_test,
-                p=2,
-                dim=-1,
-            ).to(dtype=all_eeg_features.dtype)
-        else:
-            eeg_centroid_test = all_eeg_features.to(dtype=torch.float32).mean(dim=0)
-            text_centroid_test = all_text_features.to(dtype=torch.float32).mean(dim=0)
-            delta_test = text_centroid_test - eeg_centroid_test
-            all_eeg_features = F.normalize(all_eeg_features.to(dtype=torch.float32) + delta_test, p=2, dim=-1).to(dtype=all_eeg_features.dtype)
-    else:
-        eeg_centroid_test = all_eeg_features.to(dtype=torch.float32).mean(dim=0)
-        text_centroid_test = all_text_features.to(dtype=torch.float32).mean(dim=0)
-        delta_test = text_centroid_test - eeg_centroid_test
-        all_eeg_features = F.normalize(all_eeg_features.to(dtype=torch.float32) + delta_test, p=2, dim=-1).to(dtype=all_eeg_features.dtype)
     
     # 计算相似度矩阵 (N, N)
     similarity = torch.matmul(all_eeg_features, all_text_features.t())
@@ -140,18 +105,19 @@ def run_retrieval_eval(model, llm, dataloader, device, test_subject_id=None):
         "top5_all": float(top5_all),
     }
 
-    if test_subject and any(s is not None for s in all_subject_ids):
+    test_subject_id = str(test_subject_id).upper() if test_subject_id is not None else None
+    if test_subject_id and any(s is not None for s in all_subject_ids):
         subj = np.array([str(s).upper() if s is not None else "UNK" for s in all_subject_ids], dtype=object)
-        unseen_mask = subj == test_subject
+        unseen_mask = subj == test_subject_id
         seen_mask = ~unseen_mask
         if unseen_mask.any():
             unseen_idx = torch.from_numpy(np.where(unseen_mask)[0]).long()
             top1_u, top5_u = _compute_topk(similarity, 5, unseen_idx)
-            print(f"Top-1 Accuracy (Unseen={test_subject}): {top1_u*100:.2f}%")
-            print(f"Top-5 Accuracy (Unseen={test_subject}): {top5_u*100:.2f}%")
+            print(f"Top-1 Accuracy (Unseen={test_subject_id}): {top1_u*100:.2f}%")
+            print(f"Top-5 Accuracy (Unseen={test_subject_id}): {top5_u*100:.2f}%")
             metrics["top1_unseen"] = float(top1_u)
             metrics["top5_unseen"] = float(top5_u)
-            metrics["unseen_subject_id"] = str(test_subject)
+            metrics["unseen_subject_id"] = str(test_subject_id)
             metrics["num_unseen"] = int(unseen_idx.numel())
         if seen_mask.any():
             seen_idx = torch.from_numpy(np.where(seen_mask)[0]).long()
@@ -284,6 +250,7 @@ def main():
     parser.add_argument("--tokenizer_name", type=str, default="meta-llama/Meta-Llama-3-8B-Instruct")
     parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--test_subject_id", type=str, default=None)
+    parser.add_argument("--tta_mode", type=str, default="none", choices=["none", "v3_0"])
     parser.add_argument("--output_prefix", type=str, default="tsne")
     parser.add_argument("--out_dir", type=str, default=None)
     args = parser.parse_args()
@@ -323,6 +290,55 @@ def main():
     eeg_feats, text_feats, subject_ids, metrics = run_retrieval_eval(
         model, llm, dataloader, device, test_subject_id=args.test_subject_id
     )
+    if args.tta_mode == "v3_0":
+        if not args.test_subject_id:
+            raise ValueError("--tta_mode v3_0 requires --test_subject_id to define the unseen subject.")
+        if not isinstance(state, dict):
+            raise ValueError("Checkpoint not loaded. v3_0 requires a checkpoint with centroid_tracker.text_centroid.")
+        state_dict = state.get("state_dict", state)
+        if not isinstance(state_dict, dict) or "centroid_tracker.text_centroid" not in state_dict:
+            raise ValueError("Missing centroid_tracker.text_centroid in checkpoint. Ensure training saved CentroidTracker buffers.")
+        train_text_centroid = state_dict["centroid_tracker.text_centroid"].to(dtype=torch.float32)
+        train_text_centroid = train_text_centroid.to(device="cpu")
+        subj = np.array([str(s).upper() if s is not None else "UNK" for s in subject_ids], dtype=object)
+        unseen_mask_np = subj == str(args.test_subject_id).upper()
+        if unseen_mask_np.any():
+            unseen_idx = torch.from_numpy(np.where(unseen_mask_np)[0]).long()
+            eeg_t = torch.from_numpy(eeg_feats).to(dtype=torch.float32)
+            unseen_eeg_centroid = eeg_t[unseen_idx].mean(dim=0)
+            eeg_t[unseen_idx] = F.normalize(
+                eeg_t[unseen_idx] - unseen_eeg_centroid + train_text_centroid,
+                p=2,
+                dim=-1,
+            )
+            eeg_feats = eeg_t.numpy()
+        else:
+            print(f"Warning: No samples found for unseen subject_id={str(args.test_subject_id).upper()}. Skipping v3_0 adaptation.")
+        eeg_feats_t = torch.from_numpy(eeg_feats).to(dtype=torch.float32)
+        text_feats_t = torch.from_numpy(text_feats).to(dtype=torch.float32)
+        similarity = torch.matmul(F.normalize(eeg_feats_t, p=2, dim=-1), F.normalize(text_feats_t, p=2, dim=-1).t())
+        num_samples = similarity.size(0)
+        all_idx = torch.arange(num_samples, device=similarity.device)
+        top1_all, top5_all = _compute_topk(similarity, 5, all_idx)
+        metrics["top1_all"] = float(top1_all)
+        metrics["top5_all"] = float(top5_all)
+        test_subject = str(args.test_subject_id).upper()
+        subj = np.array([str(s).upper() if s is not None else "UNK" for s in subject_ids], dtype=object)
+        unseen_mask = subj == test_subject
+        if unseen_mask.any():
+            unseen_idx = torch.from_numpy(np.where(unseen_mask)[0]).long()
+            top1_u, top5_u = _compute_topk(similarity, 5, unseen_idx)
+            metrics["top1_unseen"] = float(top1_u)
+            metrics["top5_unseen"] = float(top5_u)
+            metrics["unseen_subject_id"] = str(test_subject)
+            metrics["num_unseen"] = int(unseen_idx.numel())
+        seen_mask = ~unseen_mask
+        if seen_mask.any():
+            seen_idx = torch.from_numpy(np.where(seen_mask)[0]).long()
+            top1_s, top5_s = _compute_topk(similarity, 5, seen_idx)
+            metrics["top1_seen"] = float(top1_s)
+            metrics["top5_seen"] = float(top5_s)
+            metrics["num_seen"] = int(seen_idx.numel())
     metrics_payload = {
         "checkpoint": os.path.abspath(args.checkpoint),
         "checkpoint_version": _infer_version_tag_from_checkpoint_path(args.checkpoint),

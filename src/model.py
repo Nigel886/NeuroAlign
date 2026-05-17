@@ -57,8 +57,6 @@ class EEGTransformerEncoder(nn.Module):
         dim_feedforward=2048,
         dropout=0.1,
         output_dim=4096,
-        content_dim=384,
-        style_dim=128,
         enable_centering=True,
     ):
         super(EEGTransformerEncoder, self).__init__()
@@ -78,14 +76,9 @@ class EEGTransformerEncoder(nn.Module):
             batch_first=True
         )
         self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
-        
-        self.style_dim = int(style_dim)
 
-        # 4. Dual-head projection
-        # proj_semantic: (d_model -> 4096) for Llama-3 space
-        # proj_style: (d_model -> 128) for disentanglement regularization
+        # 4. Projection to LLM space
         self.proj_semantic = nn.Linear(d_model, output_dim)
-        self.proj_style = nn.Linear(d_model, self.style_dim)
         self.centering = CenteringLayer(output_dim) if enable_centering else None
         
         self.d_model = d_model
@@ -95,9 +88,6 @@ class EEGTransformerEncoder(nn.Module):
         initrange = 0.1
         self.input_projection.bias.data.zero_()
         self.input_projection.weight.data.uniform_(-initrange, initrange)
-        
-        nn.init.xavier_normal_(self.proj_style.weight)
-        nn.init.constant_(self.proj_style.bias, 0)
 
     def forward(
         self,
@@ -131,10 +121,7 @@ class EEGTransformerEncoder(nn.Module):
         if self.centering is not None:
             z_semantic = self.centering(z_semantic, delta=centering_delta)
         z_semantic = F.normalize(z_semantic, p=2, dim=-1)
-
-        z_style = self.proj_style(pooled_output)
-
-        return z_semantic, z_style
+        return z_semantic
 
     @torch.no_grad()
     def set_centering_delta(self, delta):
@@ -179,4 +166,4 @@ if __name__ == "__main__":
     
     test_input = torch.randn(4, 15, 105)
     out = model(test_input)
-    print(f"Aligned EEG Feature Shape: {out[0].shape}") # (4, 4096)
+    print(f"Aligned EEG Feature Shape: {out.shape}") # (4, 4096)
