@@ -4,6 +4,26 @@ This document tracks the iterative development of the NeuroAlign framework, focu
 
 ---
 
+## [v4.0_tent] 2026-05-18 - Project Phantom: Full-Spectrum Active TTA Overhaul & Representation Collapse
+
+**Objective:** Map out the absolute boundary of active parameter-updating via Test-time Entropy Minimization (TENT) by optimizing shared LayerNorm weights online across both ZAB and ZPH independent subject partitions.
+
+### 📊 Full-Spectrum Paradigm Comparison: Passive OT Matrix vs. Active TENT Optimizers
+
+| Evaluation Subspace | Target Metric | v3.0 Inductive Base | v3.1_ot (Passive, $\epsilon=0.02$) | v4.0_tent (Active TENT) | Current State |
+| :--- | :--- | :---: | :---: | :---: | :--- |
+| \multirow{2}{*}{\textbf{loso_ZAB}} | Seen Top-1 / Top-5 | 7.58% / 40.70% | **7.58% / 40.70%** | 6.94% / 39.33% | ⚠️ Shared Base Distorted |
+| & Unseen Top-1 / Top-5 | 0.00% / 0.38% | **0.13% / 0.51%** | 0.00% / 0.38% | ❌ Degenerated to Baseline |
+| \midrule
+| \multirow{2}{*}{\textbf{loso_ZPH}} | Seen Top-1 / Top-5 | **9.05% / 43.75%** | **9.05% / 43.75%** | 8.95% / 43.72% | ⚠️ Statistical Drift |
+| & Unseen Top-1 / Top-5 | 0.00% / 0.00% | 0.00% / 0.00% | 0.00% / 0.00% | 🛑 Subspace Abyss |
+
+### 🔍 Unified Technical Diagnosis:
+1. **The Curse of Sparse High-Dim Softmax:** TENT optimizes the Shannon Entropy ($L_{\text{entropy}} = -\sum p \log p$). In standard image classifiers with discrete, low-dim outputs, this forces crisp category boundaries. However, inside Llama-3's 4096-D open-ended text embedding space, the model easily shortcuts the loss by adjusting LayerNorm scaling to push all unseen EEG vectors into an arbitrary, concentrated wrong text neighborhood, creating high confidence but zero accuracy.
+2. **Cross-Domain Feature Contamination:** Because LayerNorm layers capture global channel statistics, updating their weights using completely unlabelled, out-of-distribution unseen domain sequences directly spoils the delicate multi-subject semantic structures already mastered for the seen domains. This mathematically accounts for the performance drops observed in both seen sets.
+
+---
+
 ## [v3.1_ot] 2026-05-18 - Project Phantom: Full Entropic Sweep on Sovereign Outlier (ZPH Boundary Mapping)
 
 **Objective:** Map out the definitive mid-to-high entropic boundaries (`reg=0.05` and `reg=0.10`) on the unpolluted ZPH-isolated base model to test if full probabilistic mass diffusion can force cross-subject manifold realignment.

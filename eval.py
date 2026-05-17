@@ -11,6 +11,7 @@ import argparse
 import json
 import datetime
 import re
+import copy
 
 class _CentroidTracker(torch.nn.Module):
     def __init__(self, dim):
@@ -98,8 +99,18 @@ def sinkhorn_alignment(unseen_features, seen_features, reg=0.05, max_iter=100):
     P = u.unsqueeze(1) * K * v.unsqueeze(0) 
     transformed_features = torch.mm(P, seen_features) * N_u
     return transformed_features
+
+def configure_tent_model(model):
+    model.requires_grad_(False)
+    model.eval()
+    for m in model.modules():
+        if isinstance(m, torch.nn.LayerNorm):
+            for p in m.parameters(recurse=False):
+                p.requires_grad_(True)
+            m.train()
+    return model
     
-def run_retrieval_eval(model, llm, dataloader, device, test_subject_id=None, tta_mode="none", reg=0.05):
+def run_retrieval_eval(model, llm, dataloader, device, test_subject_id=None, tta_mode="none", reg=0.05, lr_tta=1e-5):
     model.eval()
     llm.eval()
     
@@ -108,34 +119,96 @@ def run_retrieval_eval(model, llm, dataloader, device, test_subject_id=None, tta
     all_subject_ids = []
     
     print("Extracting embeddings for retrieval...")
-    with torch.no_grad():
-        for batch in tqdm(dataloader):
-            input_ids = batch['input_ids'].to(device)
-            attention_mask = batch['attention_mask'].to(device)
-            eeg = batch['eeg'].to(device)
-            eeg_mask = batch['eeg_mask'].to(device)
+    if str(tta_mode).lower() in {"v4_0_tent", "tent"}:
+        if test_subject_id is None:
+            raise ValueError("--tta_mode v4_0_tent requires --test_subject_id to define the unseen subject.")
+        test_subject_id = str(test_subject_id).upper()
+
+        with torch.no_grad():
+            for batch in tqdm(dataloader):
+                input_ids = batch["input_ids"].to(device)
+                attention_mask = batch["attention_mask"].to(device)
+                outputs = llm(input_ids=input_ids, attention_mask=attention_mask, output_hidden_states=True)
+                last_hidden_state = outputs.hidden_states[-1]
+                text_mask = attention_mask.unsqueeze(-1).float()
+                text_feat = torch.sum(last_hidden_state * text_mask, dim=1) / torch.sum(text_mask, dim=1).clamp(min=1e-9)
+                text_feat = F.normalize(text_feat, p=2, dim=-1)
+                all_text_features.append(text_feat.detach().to(dtype=torch.float32).cpu())
+                all_subject_ids.extend(batch.get("subject_ids", [None] * int(text_feat.size(0))))
+        all_text_features = torch.cat(all_text_features, dim=0)
+        all_text_features = F.normalize(all_text_features.to(dtype=torch.float32), p=2, dim=-1)
+        text_bank = all_text_features.to(device=device, dtype=torch.float32)
+
+        tent_model = configure_tent_model(copy.deepcopy(model).to(device))
+        tent_params = [p for p in tent_model.parameters() if p.requires_grad]
+        if not tent_params:
+            raise ValueError("No trainable LayerNorm parameters found for TENT.")
+        optimizer = torch.optim.Adam(tent_params, lr=float(lr_tta))
+
+        for _ in range(1):
+            for batch in tqdm(dataloader, desc="TENT"):
+                eeg = batch["eeg"].to(device)
+                eeg_mask = batch["eeg_mask"].to(device)
+                subject_ids = batch.get("subject_ids", [None] * int(eeg.size(0)))
+                subj = np.array([str(s).upper() if s is not None else "UNK" for s in subject_ids], dtype=object)
+                unseen_mask_batch = subj == test_subject_id
+                if not unseen_mask_batch.any():
+                    continue
+                idx = torch.from_numpy(np.where(unseen_mask_batch)[0]).long().to(device)
+                eeg_u = eeg.index_select(0, idx)
+                eeg_mask_u = eeg_mask.index_select(0, idx)
+
+                src_key_padding_mask = (eeg_mask_u == 0)
+                z_semantic = tent_model(eeg_u, src_key_padding_mask=src_key_padding_mask)
+                z_semantic = F.normalize(z_semantic.to(dtype=torch.float32), p=2, dim=-1)
+                logits = torch.matmul(z_semantic, text_bank.t())
+                p = F.softmax(logits / 0.05, dim=-1)
+                loss = -torch.sum(p * torch.log(p + 1e-9), dim=-1).mean()
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+
+        tent_model.eval()
+        all_eeg_features = []
+        with torch.no_grad():
+            for batch in tqdm(dataloader, desc="Extracting EEG (TENT)"):
+                eeg = batch["eeg"].to(device)
+                eeg_mask = batch["eeg_mask"].to(device)
+                src_key_padding_mask = (eeg_mask == 0)
+                z_semantic = tent_model(eeg, src_key_padding_mask=src_key_padding_mask)
+                eeg_feat = F.normalize(z_semantic.detach().to(dtype=torch.float32), p=2, dim=-1)
+                all_eeg_features.append(eeg_feat.cpu())
+        all_eeg_features = torch.cat(all_eeg_features, dim=0)
+        all_eeg_features = F.normalize(all_eeg_features.to(dtype=torch.float32), p=2, dim=-1)
+    else:
+        with torch.no_grad():
+            for batch in tqdm(dataloader):
+                input_ids = batch['input_ids'].to(device)
+                attention_mask = batch['attention_mask'].to(device)
+                eeg = batch['eeg'].to(device)
+                eeg_mask = batch['eeg_mask'].to(device)
+                
+                # 1. EEG 嵌入提取
+                src_key_padding_mask = (eeg_mask == 0)
+                z_semantic = model(eeg, src_key_padding_mask=src_key_padding_mask)
+                eeg_feat = z_semantic.detach().to(dtype=torch.float32)
+                eeg_feat = F.normalize(eeg_feat, p=2, dim=-1)
+                
+                # 2. Text 嵌入提取 (LLM)
+                outputs = llm(input_ids=input_ids, attention_mask=attention_mask, output_hidden_states=True)
+                last_hidden_state = outputs.hidden_states[-1]
+                text_mask = attention_mask.unsqueeze(-1).float()
+                text_feat = torch.sum(last_hidden_state * text_mask, dim=1) / torch.sum(text_mask, dim=1).clamp(min=1e-9)
+                text_feat = F.normalize(text_feat, p=2, dim=-1)
+                
+                all_eeg_features.append(eeg_feat.cpu())
+                all_text_features.append(text_feat.cpu())
+                all_subject_ids.extend(batch.get("subject_ids", [None] * eeg_feat.size(0)))
             
-            # 1. EEG 嵌入提取
-            src_key_padding_mask = (eeg_mask == 0)
-            z_semantic = model(eeg, src_key_padding_mask=src_key_padding_mask)
-            eeg_feat = z_semantic.detach().to(dtype=torch.float32)
-            eeg_feat = F.normalize(eeg_feat, p=2, dim=-1)
-            
-            # 2. Text 嵌入提取 (LLM)
-            outputs = llm(input_ids=input_ids, attention_mask=attention_mask, output_hidden_states=True)
-            last_hidden_state = outputs.hidden_states[-1]
-            text_mask = attention_mask.unsqueeze(-1).float()
-            text_feat = torch.sum(last_hidden_state * text_mask, dim=1) / torch.sum(text_mask, dim=1).clamp(min=1e-9)
-            text_feat = F.normalize(text_feat, p=2, dim=-1)
-            
-            all_eeg_features.append(eeg_feat.cpu())
-            all_text_features.append(text_feat.cpu())
-            all_subject_ids.extend(batch.get("subject_ids", [None] * eeg_feat.size(0)))
-            
-    all_eeg_features = torch.cat(all_eeg_features, dim=0)
-    all_text_features = torch.cat(all_text_features, dim=0)
-    all_eeg_features = F.normalize(all_eeg_features.to(dtype=torch.float32), p=2, dim=-1)
-    all_text_features = F.normalize(all_text_features.to(dtype=torch.float32), p=2, dim=-1)
+        all_eeg_features = torch.cat(all_eeg_features, dim=0)
+        all_text_features = torch.cat(all_text_features, dim=0)
+        all_eeg_features = F.normalize(all_eeg_features.to(dtype=torch.float32), p=2, dim=-1)
+        all_text_features = F.normalize(all_text_features.to(dtype=torch.float32), p=2, dim=-1)
 
     test_subject_id = str(test_subject_id).upper() if test_subject_id is not None else None
     subj = None
@@ -312,7 +385,8 @@ def main():
     parser.add_argument("--tokenizer_name", type=str, default="meta-llama/Meta-Llama-3-8B-Instruct")
     parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--test_subject_id", type=str, default=None)
-    parser.add_argument("--tta_mode", type=str, default="none", choices=["none", "v3_1_ot"])
+    parser.add_argument("--tta_mode", type=str, default="none", choices=["none", "v3_1_ot", "v4_0_tent"])
+    parser.add_argument("--lr_tta", type=float, default=1e-5)
     parser.add_argument("--reg", type=float, default=0.05)
     parser.add_argument("--output_prefix", type=str, default="tsne")
     parser.add_argument("--out_dir", type=str, default=None)
@@ -351,7 +425,14 @@ def main():
     print(f"\nOutputs will be saved to: {output_dir}")
 
     eeg_feats, text_feats, subject_ids, metrics = run_retrieval_eval(
-        model, llm, dataloader, device, test_subject_id=args.test_subject_id, tta_mode=args.tta_mode, reg=args.reg
+        model,
+        llm,
+        dataloader,
+        device,
+        test_subject_id=args.test_subject_id,
+        tta_mode=args.tta_mode,
+        reg=args.reg,
+        lr_tta=args.lr_tta,
     )
     metrics_payload = {
         "checkpoint": os.path.abspath(args.checkpoint),
