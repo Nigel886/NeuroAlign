@@ -109,6 +109,16 @@ def configure_tent_model(model):
                 p.requires_grad_(True)
             m.train()
     return model
+
+class LowRankSubspaceProjector(torch.nn.Module):
+    def __init__(self, dim=4096, rank=16):
+        super().__init__()
+        self.down = torch.nn.Linear(int(dim), int(rank), bias=False)
+        self.up = torch.nn.Linear(int(rank), int(dim), bias=False)
+        torch.nn.init.zeros_(self.up.weight)
+
+    def forward(self, x):
+        return x + self.up(self.down(x))
     
 def run_retrieval_eval(
     model,
@@ -121,6 +131,8 @@ def run_retrieval_eval(
     lr_tta=1e-5,
     lambda_anchor=1.0,
     lambda_elastic=10.0,
+    lambda_proto=5.0,
+    tta_rank=16,
     train_text_centroid=None,
 ):
     model.eval()
@@ -131,7 +143,94 @@ def run_retrieval_eval(
     all_subject_ids = []
     
     print("Extracting embeddings for retrieval...")
-    if str(tta_mode).lower() in {"v5_0_sga", "sga"}:
+    if str(tta_mode).lower() in {"v6_0_cpa_lsr", "cpa_lsr"}:
+        if test_subject_id is None:
+            raise ValueError("--tta_mode v6_0_cpa_lsr requires --test_subject_id to define the unseen subject.")
+        test_subject_id = str(test_subject_id).upper()
+        if train_text_centroid is None:
+            raise ValueError("v6_0_cpa_lsr requires train_text_centroid loaded from checkpoint (centroid_tracker.text_centroid).")
+        train_text_centroid = train_text_centroid.to(device=device, dtype=torch.float32)
+
+        model.requires_grad_(False)
+        model.eval()
+
+        with torch.no_grad():
+            for batch in tqdm(dataloader):
+                input_ids = batch["input_ids"].to(device)
+                attention_mask = batch["attention_mask"].to(device)
+                outputs = llm(input_ids=input_ids, attention_mask=attention_mask, output_hidden_states=True)
+                last_hidden_state = outputs.hidden_states[-1]
+                text_mask = attention_mask.unsqueeze(-1).float()
+                text_feat = torch.sum(last_hidden_state * text_mask, dim=1) / torch.sum(text_mask, dim=1).clamp(min=1e-9)
+                text_feat = F.normalize(text_feat, p=2, dim=-1)
+                all_text_features.append(text_feat.detach().to(dtype=torch.float32).cpu())
+                all_subject_ids.extend(batch.get("subject_ids", [None] * int(text_feat.size(0))))
+        all_text_features = torch.cat(all_text_features, dim=0)
+        all_text_features = F.normalize(all_text_features.to(dtype=torch.float32), p=2, dim=-1)
+        text_bank = all_text_features.to(device=device, dtype=torch.float32)
+
+        dim = int(text_bank.size(-1))
+        projector = LowRankSubspaceProjector(dim=dim, rank=int(tta_rank)).to(device)
+        optimizer = torch.optim.Adam(projector.parameters(), lr=float(lr_tta))
+
+        for _ in range(1):
+            for batch in tqdm(dataloader, desc="CPA-LSR"):
+                eeg = batch["eeg"].to(device)
+                eeg_mask = batch["eeg_mask"].to(device)
+                subject_ids = batch.get("subject_ids", None)
+                if subject_ids is None:
+                    raise ValueError("--tta_mode v6_0_cpa_lsr requires subject_ids in batch.")
+                subj = np.array([str(s).upper() if s is not None else "UNK" for s in subject_ids], dtype=object)
+                unseen_mask_batch = subj == test_subject_id
+                if not unseen_mask_batch.any():
+                    continue
+                idx = torch.from_numpy(np.where(unseen_mask_batch)[0]).long().to(device)
+                eeg_u = eeg.index_select(0, idx)
+                eeg_mask_u = eeg_mask.index_select(0, idx)
+
+                src_key_padding_mask = (eeg_mask_u == 0)
+                with torch.no_grad():
+                    raw = model(eeg_u, src_key_padding_mask=src_key_padding_mask)
+                    raw = F.normalize(raw.to(dtype=torch.float32), p=2, dim=-1)
+                z_calibrated = projector(raw)
+                logits = torch.mm(z_calibrated, text_bank.t())
+                p = F.softmax(logits / 0.05, dim=-1)
+                loss_entropy = -torch.sum(p * torch.log(p + 1e-9), dim=-1).mean()
+                current_unseen_centroid = z_calibrated.mean(dim=0)
+                loss_proto = 1.0 - F.cosine_similarity(
+                    current_unseen_centroid.unsqueeze(0),
+                    train_text_centroid.unsqueeze(0),
+                ).mean()
+                loss_total = loss_entropy + float(lambda_proto) * loss_proto
+                optimizer.zero_grad()
+                loss_total.backward()
+                optimizer.step()
+
+        projector.eval()
+        all_eeg_features = []
+        with torch.no_grad():
+            for batch in tqdm(dataloader, desc="Extracting EEG (CPA-LSR)"):
+                eeg = batch["eeg"].to(device)
+                eeg_mask = batch["eeg_mask"].to(device)
+                subject_ids = batch.get("subject_ids", None)
+                if subject_ids is None:
+                    raise ValueError("--tta_mode v6_0_cpa_lsr requires subject_ids in batch.")
+                subj = np.array([str(s).upper() if s is not None else "UNK" for s in subject_ids], dtype=object)
+                unseen_mask_batch = subj == test_subject_id
+
+                src_key_padding_mask = (eeg_mask == 0)
+                raw = model(eeg, src_key_padding_mask=src_key_padding_mask)
+                raw = F.normalize(raw.to(dtype=torch.float32), p=2, dim=-1)
+                if unseen_mask_batch.any():
+                    idx = torch.from_numpy(np.where(unseen_mask_batch)[0]).long().to(device)
+                    raw_u = raw.index_select(0, idx)
+                    raw_cal = projector(raw_u)
+                    raw.index_copy_(0, idx, F.normalize(raw_cal.to(dtype=torch.float32), p=2, dim=-1))
+                all_eeg_features.append(raw.cpu())
+        all_eeg_features = torch.cat(all_eeg_features, dim=0)
+        all_eeg_features = F.normalize(all_eeg_features.to(dtype=torch.float32), p=2, dim=-1)
+
+    elif str(tta_mode).lower() in {"v5_0_sga", "sga"}:
         if test_subject_id is None:
             raise ValueError("--tta_mode v5_0_sga requires --test_subject_id to define the unseen subject.")
         test_subject_id = str(test_subject_id).upper()
@@ -485,11 +584,13 @@ def main():
     parser.add_argument("--tokenizer_name", type=str, default="meta-llama/Meta-Llama-3-8B-Instruct")
     parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--test_subject_id", type=str, default=None)
-    parser.add_argument("--tta_mode", type=str, default="none", choices=["none", "v3_1_ot", "v4_0_tent", "v5_0_sga"])
-    parser.add_argument("--lr_tta", type=float, default=1e-5)
+    parser.add_argument("--tta_mode", type=str, default="none", choices=["none", "v3_1_ot", "v4_0_tent", "v5_0_sga", "v6_0_cpa_lsr"])
+    parser.add_argument("--lr_tta", type=float, default=1e-4)
     parser.add_argument("--reg", type=float, default=0.05)
     parser.add_argument("--lambda_anchor", type=float, default=1.0)
     parser.add_argument("--lambda_elastic", type=float, default=10.0)
+    parser.add_argument("--lambda_proto", type=float, default=5.0)
+    parser.add_argument("--tta_rank", type=int, default=16)
     parser.add_argument("--output_prefix", type=str, default="tsne")
     parser.add_argument("--out_dir", type=str, default=None)
     args = parser.parse_args()
@@ -542,6 +643,8 @@ def main():
         lr_tta=args.lr_tta,
         lambda_anchor=args.lambda_anchor,
         lambda_elastic=args.lambda_elastic,
+        lambda_proto=args.lambda_proto,
+        tta_rank=args.tta_rank,
         train_text_centroid=train_text_centroid,
     )
     metrics_payload = {
