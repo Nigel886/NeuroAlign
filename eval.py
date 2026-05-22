@@ -112,36 +112,74 @@ def configure_tent_model(model):
             m.train()
     return model
 
-class MultiHeadLowRankSubspaceProjector(nn.Module):
+class DynamicGatedMultiHeadLowRankProjector(nn.Module):
     """
-    v6.1_mhlr: 多头低秩子空间投影层 (Multi-Head Low-Rank Projector)
-    将 4096 维隐藏空间划分为多个独立的语义头，在每个头内独立学习低秩流形变换。
+    v6.2_dgmhlr: 动态门控多头低秩子空间投影层 (Dynamic-Gated Multi-Head Low-Rank Projector)
+    在每个 head 内独立学习低秩残差，并用输入自适应 gate 对各 head 的残差进行动态加权。
     """
 
     def __init__(self, embed_dim=4096, num_heads=8, rank=4):
         super().__init__()
-        self.embed_dim = embed_dim
-        self.num_heads = num_heads
-        self.head_dim = embed_dim // num_heads
-        self.rank = rank
+        self.embed_dim = int(embed_dim)
+        self.num_heads = int(num_heads)
+        self.head_dim = self.embed_dim // self.num_heads
+        self.rank = int(rank)
 
-        assert embed_dim % num_heads == 0, f"embed_dim ({embed_dim}) 必须能被 num_heads ({num_heads}) 整除！"
+        assert self.embed_dim % self.num_heads == 0, f"embed_dim ({self.embed_dim}) 必须能被 num_heads ({self.num_heads}) 整除！"
 
         self.down_projs = nn.ParameterList(
-            [nn.Parameter(torch.empty(self.rank, self.head_dim)) for _ in range(num_heads)]
+            [nn.Parameter(torch.empty(self.rank, self.head_dim)) for _ in range(self.num_heads)]
         )
         self.up_projs = nn.ParameterList(
-            [nn.Parameter(torch.empty(self.head_dim, self.rank)) for _ in range(num_heads)]
+            [nn.Parameter(torch.empty(self.head_dim, self.rank)) for _ in range(self.num_heads)]
         )
+        self.gating = nn.Linear(self.embed_dim, self.num_heads, bias=True)
 
         self.reset_parameters()
 
     def reset_parameters(self):
-        """
-        初始化策略：
-        Down 矩阵采用 Kaiming Uniform 初始化。
-        Up 矩阵采用【全零初始化】，确保 TTA 初始状态下 Delta W 为 0，对 Seen 域完全恒等映射，保持 100% 绝对免疫。
-        """
+        with torch.no_grad():
+            for i in range(self.num_heads):
+                nn.init.kaiming_uniform_(self.down_projs[i], a=math.sqrt(5))
+                nn.init.zeros_(self.up_projs[i])
+            nn.init.zeros_(self.gating.weight)
+            nn.init.zeros_(self.gating.bias)
+
+    def forward(self, x):
+        batch_size = x.size(0)
+        x_heads = x.view(batch_size, self.num_heads, self.head_dim)
+        gates = F.softmax(self.gating(x), dim=-1)
+
+        out_heads = []
+        for i in range(self.num_heads):
+            h_in = x_heads[:, i, :]
+            h_low = F.linear(h_in, self.down_projs[i])
+            h_delta = F.linear(h_low, self.up_projs[i])
+            h_out = h_in + gates[:, i].unsqueeze(1) * h_delta
+            out_heads.append(h_out)
+
+        out = torch.stack(out_heads, dim=1).view(batch_size, self.embed_dim)
+        return out
+
+class MultiHeadLowRankSubspaceProjector(nn.Module):
+    def __init__(self, embed_dim=4096, num_heads=8, rank=4):
+        super().__init__()
+        self.embed_dim = int(embed_dim)
+        self.num_heads = int(num_heads)
+        self.head_dim = self.embed_dim // self.num_heads
+        self.rank = int(rank)
+
+        assert self.embed_dim % self.num_heads == 0, f"embed_dim ({self.embed_dim}) 必须能被 num_heads ({self.num_heads}) 整除！"
+
+        self.down_projs = nn.ParameterList(
+            [nn.Parameter(torch.empty(self.rank, self.head_dim)) for _ in range(self.num_heads)]
+        )
+        self.up_projs = nn.ParameterList(
+            [nn.Parameter(torch.empty(self.head_dim, self.rank)) for _ in range(self.num_heads)]
+        )
+        self.reset_parameters()
+
+    def reset_parameters(self):
         with torch.no_grad():
             for i in range(self.num_heads):
                 nn.init.kaiming_uniform_(self.down_projs[i], a=math.sqrt(5))
@@ -197,12 +235,12 @@ def run_retrieval_eval(
     all_subject_ids = []
     
     print("Extracting embeddings for retrieval...")
-    if tta_mode in ["v6_0_cpa_lsr", "v6_1_mhlr"]:
+    if tta_mode in ["v6_0_cpa_lsr", "v6_1_mhlr", "v6_2_dgmhlr"]:
         if test_subject_id is None:
-            raise ValueError("--tta_mode v6_0_cpa_lsr/v6_1_mhlr requires --test_subject_id to define the unseen subject.")
+            raise ValueError("--tta_mode v6_0_cpa_lsr/v6_1_mhlr/v6_2_dgmhlr requires --test_subject_id to define the unseen subject.")
         test_subject_id = str(test_subject_id).upper()
         if train_text_centroid is None:
-            raise ValueError("v6_0_cpa_lsr/v6_1_mhlr requires train_text_centroid loaded from checkpoint (centroid_tracker.text_centroid).")
+            raise ValueError("v6_0_cpa_lsr/v6_1_mhlr/v6_2_dgmhlr requires train_text_centroid loaded from checkpoint (centroid_tracker.text_centroid).")
         train_text_centroid = train_text_centroid.to(device=device, dtype=torch.float32)
 
         model.requires_grad_(False)
@@ -223,7 +261,9 @@ def run_retrieval_eval(
         all_text_features = F.normalize(all_text_features.to(dtype=torch.float32), p=2, dim=-1)
         text_bank = all_text_features.to(device=device, dtype=torch.float32)
 
-        if tta_mode == "v6_1_mhlr":
+        if tta_mode == "v6_2_dgmhlr":
+            projector = DynamicGatedMultiHeadLowRankProjector(embed_dim=4096, num_heads=8, rank=tta_rank).to(device)
+        elif tta_mode == "v6_1_mhlr":
             projector = MultiHeadLowRankSubspaceProjector(embed_dim=4096, num_heads=8, rank=tta_rank).to(device)
         else:
             projector = LowRankSubspaceProjector(embed_dim=4096, rank=tta_rank).to(device)
@@ -640,7 +680,7 @@ def main():
     parser.add_argument("--tokenizer_name", type=str, default="meta-llama/Meta-Llama-3-8B-Instruct")
     parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--test_subject_id", type=str, default=None)
-    parser.add_argument("--tta_mode", type=str, default="none", choices=["none", "v3_1_ot", "v4_0_tent", "v5_0_sga", "v6_0_cpa_lsr", "v6_1_mhlr"])
+    parser.add_argument("--tta_mode", type=str, default="none", choices=["none", "v3_1_ot", "v4_0_tent", "v5_0_sga", "v6_0_cpa_lsr", "v6_1_mhlr", "v6_2_dgmhlr"])
     parser.add_argument("--lr_tta", type=float, default=1e-4)
     parser.add_argument("--reg", type=float, default=0.05)
     parser.add_argument("--lambda_anchor", type=float, default=1.0)
