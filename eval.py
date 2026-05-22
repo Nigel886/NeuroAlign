@@ -12,6 +12,8 @@ import json
 import datetime
 import re
 import copy
+import math
+import torch.nn as nn
 
 class _CentroidTracker(torch.nn.Module):
     def __init__(self, dim):
@@ -110,11 +112,63 @@ def configure_tent_model(model):
             m.train()
     return model
 
-class LowRankSubspaceProjector(torch.nn.Module):
-    def __init__(self, dim=4096, rank=16):
+class MultiHeadLowRankSubspaceProjector(nn.Module):
+    """
+    v6.1_mhlr: 多头低秩子空间投影层 (Multi-Head Low-Rank Projector)
+    将 4096 维隐藏空间划分为多个独立的语义头，在每个头内独立学习低秩流形变换。
+    """
+
+    def __init__(self, embed_dim=4096, num_heads=8, rank=4):
         super().__init__()
-        self.down = torch.nn.Linear(int(dim), int(rank), bias=False)
-        self.up = torch.nn.Linear(int(rank), int(dim), bias=False)
+        self.embed_dim = embed_dim
+        self.num_heads = num_heads
+        self.head_dim = embed_dim // num_heads
+        self.rank = rank
+
+        assert embed_dim % num_heads == 0, f"embed_dim ({embed_dim}) 必须能被 num_heads ({num_heads}) 整除！"
+
+        self.down_projs = nn.ParameterList(
+            [nn.Parameter(torch.empty(self.rank, self.head_dim)) for _ in range(num_heads)]
+        )
+        self.up_projs = nn.ParameterList(
+            [nn.Parameter(torch.empty(self.head_dim, self.rank)) for _ in range(num_heads)]
+        )
+
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        """
+        初始化策略：
+        Down 矩阵采用 Kaiming Uniform 初始化。
+        Up 矩阵采用【全零初始化】，确保 TTA 初始状态下 Delta W 为 0，对 Seen 域完全恒等映射，保持 100% 绝对免疫。
+        """
+        with torch.no_grad():
+            for i in range(self.num_heads):
+                nn.init.kaiming_uniform_(self.down_projs[i], a=math.sqrt(5))
+                nn.init.zeros_(self.up_projs[i])
+
+    def forward(self, x):
+        batch_size = x.size(0)
+        x_heads = x.view(batch_size, self.num_heads, self.head_dim)
+
+        out_heads = []
+        for i in range(self.num_heads):
+            h_in = x_heads[:, i, :]
+            h_low = F.linear(h_in, self.down_projs[i])
+            h_delta = F.linear(h_low, self.up_projs[i])
+            h_out = h_in + h_delta
+            out_heads.append(h_out)
+
+        out = torch.stack(out_heads, dim=1).view(batch_size, self.embed_dim)
+        return out
+
+class LowRankSubspaceProjector(nn.Module):
+    def __init__(self, embed_dim=4096, rank=16):
+        super().__init__()
+        self.embed_dim = int(embed_dim)
+        self.rank = int(rank)
+        self.down = nn.Linear(self.embed_dim, self.rank, bias=False)
+        self.up = nn.Linear(self.rank, self.embed_dim, bias=False)
         torch.nn.init.zeros_(self.up.weight)
 
     def forward(self, x):
@@ -143,12 +197,12 @@ def run_retrieval_eval(
     all_subject_ids = []
     
     print("Extracting embeddings for retrieval...")
-    if str(tta_mode).lower() in {"v6_0_cpa_lsr", "cpa_lsr"}:
+    if tta_mode in ["v6_0_cpa_lsr", "v6_1_mhlr"]:
         if test_subject_id is None:
-            raise ValueError("--tta_mode v6_0_cpa_lsr requires --test_subject_id to define the unseen subject.")
+            raise ValueError("--tta_mode v6_0_cpa_lsr/v6_1_mhlr requires --test_subject_id to define the unseen subject.")
         test_subject_id = str(test_subject_id).upper()
         if train_text_centroid is None:
-            raise ValueError("v6_0_cpa_lsr requires train_text_centroid loaded from checkpoint (centroid_tracker.text_centroid).")
+            raise ValueError("v6_0_cpa_lsr/v6_1_mhlr requires train_text_centroid loaded from checkpoint (centroid_tracker.text_centroid).")
         train_text_centroid = train_text_centroid.to(device=device, dtype=torch.float32)
 
         model.requires_grad_(False)
@@ -169,9 +223,11 @@ def run_retrieval_eval(
         all_text_features = F.normalize(all_text_features.to(dtype=torch.float32), p=2, dim=-1)
         text_bank = all_text_features.to(device=device, dtype=torch.float32)
 
-        dim = int(text_bank.size(-1))
-        projector = LowRankSubspaceProjector(dim=dim, rank=int(tta_rank)).to(device)
-        optimizer = torch.optim.Adam(projector.parameters(), lr=float(lr_tta))
+        if tta_mode == "v6_1_mhlr":
+            projector = MultiHeadLowRankSubspaceProjector(embed_dim=4096, num_heads=8, rank=tta_rank).to(device)
+        else:
+            projector = LowRankSubspaceProjector(embed_dim=4096, rank=tta_rank).to(device)
+        optimizer_tta = torch.optim.AdamW(projector.parameters(), lr=float(lr_tta))
 
         for _ in range(1):
             for batch in tqdm(dataloader, desc="CPA-LSR"):
@@ -202,9 +258,9 @@ def run_retrieval_eval(
                     train_text_centroid.unsqueeze(0),
                 ).mean()
                 loss_total = loss_entropy + float(lambda_proto) * loss_proto
-                optimizer.zero_grad()
+                optimizer_tta.zero_grad()
                 loss_total.backward()
-                optimizer.step()
+                optimizer_tta.step()
 
         projector.eval()
         all_eeg_features = []
@@ -584,7 +640,7 @@ def main():
     parser.add_argument("--tokenizer_name", type=str, default="meta-llama/Meta-Llama-3-8B-Instruct")
     parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--test_subject_id", type=str, default=None)
-    parser.add_argument("--tta_mode", type=str, default="none", choices=["none", "v3_1_ot", "v4_0_tent", "v5_0_sga", "v6_0_cpa_lsr"])
+    parser.add_argument("--tta_mode", type=str, default="none", choices=["none", "v3_1_ot", "v4_0_tent", "v5_0_sga", "v6_0_cpa_lsr", "v6_1_mhlr"])
     parser.add_argument("--lr_tta", type=float, default=1e-4)
     parser.add_argument("--reg", type=float, default=0.05)
     parser.add_argument("--lambda_anchor", type=float, default=1.0)
