@@ -75,6 +75,19 @@ def compute_sinkhorn_loss(x, y, eps=0.1, max_iter=30):
     P = u.unsqueeze(1) * K * v.unsqueeze(0)
     return torch.sum(P * C)
 
+def apply_temporal_masking(eeg_batch, mask_ratio=0.2):
+    x = eeg_batch
+    if x.dim() == 3:
+        b, t, c = x.shape
+        mask = (torch.rand(b, t, device=x.device) < float(mask_ratio)).to(dtype=x.dtype)
+        mask = mask.unsqueeze(-1)
+        return x * (1.0 - mask)
+    if x.dim() == 2:
+        b, d = x.shape
+        mask = (torch.rand(b, d, device=x.device) < float(mask_ratio)).to(dtype=x.dtype)
+        return x * (1.0 - mask)
+    raise ValueError(f"apply_temporal_masking expects a 2D/3D tensor, got shape={tuple(x.shape)}")
+
 def sinkhorn_alignment(unseen_features, seen_features, reg=0.05, max_iter=100):
     norm_u = F.normalize(unseen_features, p=2, dim=-1)
     norm_s = F.normalize(seen_features, p=2, dim=-1)
@@ -255,11 +268,11 @@ def run_retrieval_eval(
     all_subject_ids = []
     
     print("Extracting embeddings for retrieval...")
-    if tta_mode in ["v6_0_cpa_lsr", "v6_1_mhlr", "v6_2_dgmhlr", "v6_2_ot_dgmhlr"]:
+    if tta_mode in ["v6_0_cpa_lsr", "v6_1_mhlr", "v6_2_dgmhlr", "v6_2_ot_dgmhlr", "v6.3_tmc_ot_dgmhlr"]:
         if test_subject_id is None:
-            raise ValueError("--tta_mode v6_0_cpa_lsr/v6_1_mhlr/v6_2_dgmhlr/v6_2_ot_dgmhlr requires --test_subject_id to define the unseen subject.")
+            raise ValueError("--tta_mode v6_0_cpa_lsr/v6_1_mhlr/v6_2_dgmhlr/v6_2_ot_dgmhlr/v6.3_tmc_ot_dgmhlr requires --test_subject_id to define the unseen subject.")
         test_subject_id = str(test_subject_id).upper()
-        if tta_mode != "v6_2_ot_dgmhlr":
+        if tta_mode not in {"v6_2_ot_dgmhlr", "v6.3_tmc_ot_dgmhlr"}:
             if train_text_centroid is None:
                 raise ValueError("v6_0_cpa_lsr/v6_1_mhlr/v6_2_dgmhlr requires train_text_centroid loaded from checkpoint (centroid_tracker.text_centroid).")
             train_text_centroid = train_text_centroid.to(device=device, dtype=torch.float32)
@@ -282,7 +295,7 @@ def run_retrieval_eval(
         all_text_features = F.normalize(all_text_features.to(dtype=torch.float32), p=2, dim=-1)
         text_bank = all_text_features.to(device=device, dtype=torch.float32)
 
-        if tta_mode in {"v6_2_dgmhlr", "v6_2_ot_dgmhlr"}:
+        if tta_mode in {"v6_2_dgmhlr", "v6_2_ot_dgmhlr", "v6.3_tmc_ot_dgmhlr"}:
             projector = DynamicGatedMultiHeadLowRankProjector(embed_dim=4096, num_heads=8, rank=tta_rank).to(device)
         elif tta_mode == "v6_1_mhlr":
             projector = MultiHeadLowRankSubspaceProjector(embed_dim=4096, num_heads=8, rank=tta_rank).to(device)
@@ -316,6 +329,15 @@ def run_retrieval_eval(
                 if tta_mode == "v6_2_ot_dgmhlr":
                     loss_ot = compute_sinkhorn_loss(z_calibrated.to(dtype=torch.float32), text_bank, eps=0.1, max_iter=30)
                     loss_total = loss_entropy + float(lambda_proto) * loss_ot
+                elif tta_mode == "v6.3_tmc_ot_dgmhlr":
+                    eeg_u_masked = apply_temporal_masking(eeg_u, mask_ratio=0.2)
+                    with torch.no_grad():
+                        raw_masked = model(eeg_u_masked, src_key_padding_mask=src_key_padding_mask)
+                        raw_masked = F.normalize(raw_masked.to(dtype=torch.float32), p=2, dim=-1)
+                    z_masked = projector(raw_masked)
+                    loss_tmc = 1.0 - F.cosine_similarity(z_calibrated, z_masked, dim=-1).mean()
+                    loss_ot = compute_sinkhorn_loss(z_calibrated.to(dtype=torch.float32), text_bank, eps=0.1, max_iter=30)
+                    loss_total = loss_entropy + float(lambda_proto) * loss_ot + 0.5 * loss_tmc
                 else:
                     current_unseen_centroid = z_calibrated.mean(dim=0)
                     loss_proto = 1.0 - F.cosine_similarity(
@@ -705,7 +727,7 @@ def main():
     parser.add_argument("--tokenizer_name", type=str, default="meta-llama/Meta-Llama-3-8B-Instruct")
     parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--test_subject_id", type=str, default=None)
-    parser.add_argument("--tta_mode", type=str, default="none", choices=["none", "v3_1_ot", "v4_0_tent", "v5_0_sga", "v6_0_cpa_lsr", "v6_1_mhlr", "v6_2_dgmhlr", "v6_2_ot_dgmhlr"])
+    parser.add_argument("--tta_mode", type=str, default="none", choices=["none", "v3_1_ot", "v4_0_tent", "v5_0_sga", "v6_0_cpa_lsr", "v6_1_mhlr", "v6_2_dgmhlr", "v6_2_ot_dgmhlr", "v6.3_tmc_ot_dgmhlr"])
     parser.add_argument("--lr_tta", type=float, default=1e-4)
     parser.add_argument("--reg", type=float, default=0.05)
     parser.add_argument("--lambda_anchor", type=float, default=1.0)
