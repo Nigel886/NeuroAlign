@@ -268,11 +268,11 @@ def run_retrieval_eval(
     all_subject_ids = []
     
     print("Extracting embeddings for retrieval...")
-    if tta_mode in ["v6_0_cpa_lsr", "v6_1_mhlr", "v6_2_dgmhlr", "v6_2_ot_dgmhlr", "v6.3_tmc_ot_dgmhlr"]:
+    if tta_mode in ["v6_0_cpa_lsr", "v6_1_mhlr", "v6_2_dgmhlr", "v6_2_ot_dgmhlr", "v6.3_tmc_ot_dgmhlr", "v6.4_mixup_anchor"]:
         if test_subject_id is None:
-            raise ValueError("--tta_mode v6_0_cpa_lsr/v6_1_mhlr/v6_2_dgmhlr/v6_2_ot_dgmhlr/v6.3_tmc_ot_dgmhlr requires --test_subject_id to define the unseen subject.")
+            raise ValueError("--tta_mode v6_0_cpa_lsr/v6_1_mhlr/v6_2_dgmhlr/v6_2_ot_dgmhlr/v6.3_tmc_ot_dgmhlr/v6.4_mixup_anchor requires --test_subject_id to define the unseen subject.")
         test_subject_id = str(test_subject_id).upper()
-        if tta_mode not in {"v6_2_ot_dgmhlr", "v6.3_tmc_ot_dgmhlr"}:
+        if tta_mode not in {"v6_2_ot_dgmhlr", "v6.3_tmc_ot_dgmhlr", "v6.4_mixup_anchor"}:
             if train_text_centroid is None:
                 raise ValueError("v6_0_cpa_lsr/v6_1_mhlr/v6_2_dgmhlr requires train_text_centroid loaded from checkpoint (centroid_tracker.text_centroid).")
             train_text_centroid = train_text_centroid.to(device=device, dtype=torch.float32)
@@ -295,7 +295,7 @@ def run_retrieval_eval(
         all_text_features = F.normalize(all_text_features.to(dtype=torch.float32), p=2, dim=-1)
         text_bank = all_text_features.to(device=device, dtype=torch.float32)
 
-        if tta_mode in {"v6_2_dgmhlr", "v6_2_ot_dgmhlr", "v6.3_tmc_ot_dgmhlr"}:
+        if tta_mode in {"v6_2_dgmhlr", "v6_2_ot_dgmhlr", "v6.3_tmc_ot_dgmhlr", "v6.4_mixup_anchor"}:
             projector = DynamicGatedMultiHeadLowRankProjector(embed_dim=4096, num_heads=8, rank=tta_rank).to(device)
         elif tta_mode == "v6_1_mhlr":
             projector = MultiHeadLowRankSubspaceProjector(embed_dim=4096, num_heads=8, rank=tta_rank).to(device)
@@ -318,11 +318,32 @@ def run_retrieval_eval(
                 eeg_u = eeg.index_select(0, idx)
                 eeg_mask_u = eeg_mask.index_select(0, idx)
 
-                src_key_padding_mask = (eeg_mask_u == 0)
-                with torch.no_grad():
-                    raw = model(eeg_u, src_key_padding_mask=src_key_padding_mask)
-                    raw = F.normalize(raw.to(dtype=torch.float32), p=2, dim=-1)
-                z_calibrated = projector(raw)
+                if tta_mode == "v6.4_mixup_anchor":
+                    idx_seen_np = np.where(~unseen_mask_batch)[0]
+                    idx_seen = torch.from_numpy(idx_seen_np).long().to(device) if idx_seen_np.size > 0 else None
+
+                    src_key_padding_mask_all = (eeg_mask == 0)
+                    with torch.no_grad():
+                        raw_all = model(eeg, src_key_padding_mask=src_key_padding_mask_all)
+                        raw_all = F.normalize(raw_all.to(dtype=torch.float32), p=2, dim=-1)
+                    raw_u = raw_all.index_select(0, idx)
+
+                    if idx_seen is not None and idx_seen.numel() > 0:
+                        raw_s = raw_all.index_select(0, idx_seen)
+                        anchor_idx = torch.randint(0, int(raw_s.size(0)), (int(raw_u.size(0)),), device=device)
+                        seen_anchor_feat = raw_s.index_select(0, anchor_idx)
+                        raw_u_mix = 0.8 * raw_u + 0.2 * seen_anchor_feat
+                    else:
+                        seen_anchor_feat = None
+                        raw_u_mix = raw_u
+
+                    z_calibrated = projector(raw_u_mix)
+                else:
+                    src_key_padding_mask = (eeg_mask_u == 0)
+                    with torch.no_grad():
+                        raw = model(eeg_u, src_key_padding_mask=src_key_padding_mask)
+                        raw = F.normalize(raw.to(dtype=torch.float32), p=2, dim=-1)
+                    z_calibrated = projector(raw)
                 logits = torch.mm(z_calibrated, text_bank.t())
                 p = F.softmax(logits / 0.05, dim=-1)
                 loss_entropy = -torch.sum(p * torch.log(p + 1e-9), dim=-1).mean()
@@ -335,6 +356,20 @@ def run_retrieval_eval(
                         raw_masked = model(eeg_u_masked, src_key_padding_mask=src_key_padding_mask)
                         raw_masked = F.normalize(raw_masked.to(dtype=torch.float32), p=2, dim=-1)
                     z_masked = projector(raw_masked)
+                    loss_tmc = 1.0 - F.cosine_similarity(z_calibrated, z_masked, dim=-1).mean()
+                    loss_ot = compute_sinkhorn_loss(z_calibrated.to(dtype=torch.float32), text_bank, eps=0.1, max_iter=30)
+                    loss_total = loss_entropy + float(lambda_proto) * loss_ot + 0.5 * loss_tmc
+                elif tta_mode == "v6.4_mixup_anchor":
+                    src_key_padding_mask = (eeg_mask_u == 0)
+                    eeg_u_masked = apply_temporal_masking(eeg_u, mask_ratio=0.2)
+                    with torch.no_grad():
+                        raw_masked = model(eeg_u_masked, src_key_padding_mask=src_key_padding_mask)
+                        raw_masked = F.normalize(raw_masked.to(dtype=torch.float32), p=2, dim=-1)
+                    if seen_anchor_feat is not None:
+                        raw_masked_mix = 0.8 * raw_masked + 0.2 * seen_anchor_feat
+                    else:
+                        raw_masked_mix = raw_masked
+                    z_masked = projector(raw_masked_mix)
                     loss_tmc = 1.0 - F.cosine_similarity(z_calibrated, z_masked, dim=-1).mean()
                     loss_ot = compute_sinkhorn_loss(z_calibrated.to(dtype=torch.float32), text_bank, eps=0.1, max_iter=30)
                     loss_total = loss_entropy + float(lambda_proto) * loss_ot + 0.5 * loss_tmc
@@ -727,7 +762,7 @@ def main():
     parser.add_argument("--tokenizer_name", type=str, default="meta-llama/Meta-Llama-3-8B-Instruct")
     parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--test_subject_id", type=str, default=None)
-    parser.add_argument("--tta_mode", type=str, default="none", choices=["none", "v3_1_ot", "v4_0_tent", "v5_0_sga", "v6_0_cpa_lsr", "v6_1_mhlr", "v6_2_dgmhlr", "v6_2_ot_dgmhlr", "v6.3_tmc_ot_dgmhlr"])
+    parser.add_argument("--tta_mode", type=str, default="none", choices=["none", "v3_1_ot", "v4_0_tent", "v5_0_sga", "v6_0_cpa_lsr", "v6_1_mhlr", "v6_2_dgmhlr", "v6_2_ot_dgmhlr", "v6.3_tmc_ot_dgmhlr", "v6.4_mixup_anchor"])
     parser.add_argument("--lr_tta", type=float, default=1e-4)
     parser.add_argument("--reg", type=float, default=0.05)
     parser.add_argument("--lambda_anchor", type=float, default=1.0)
