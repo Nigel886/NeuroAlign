@@ -14,6 +14,82 @@ import re
 import copy
 import math
 import torch.nn as nn
+import sys
+import traceback
+import atexit
+import time
+import urllib.request
+import faulthandler
+
+# #region debug-point A:bootstrap
+_DBG_ENV_PATH = os.path.join(".dbg", "eval-llama-exit.env")
+_DBG_URL = "http://127.0.0.1:7777/event"
+_DBG_SESSION = "eval-llama-exit"
+try:
+    with open(_DBG_ENV_PATH, "r", encoding="utf-8") as _f:
+        _c = _f.read().splitlines()
+    for _l in _c:
+        if _l.startswith("DEBUG_SERVER_URL="):
+            _DBG_URL = _l.split("=", 1)[1].strip() or _DBG_URL
+        elif _l.startswith("DEBUG_SESSION_ID="):
+            _DBG_SESSION = _l.split("=", 1)[1].strip() or _DBG_SESSION
+except Exception:
+    pass
+
+def _dbg_send(hypothesis_id, msg, data=None, run_id="pre"):
+    payload = {
+        "sessionId": _DBG_SESSION,
+        "runId": run_id,
+        "hypothesisId": str(hypothesis_id),
+        "location": "eval.py",
+        "msg": f"[DEBUG] {msg}",
+        "data": data or {},
+        "ts": int(time.time() * 1000),
+    }
+    try:
+        req = urllib.request.Request(
+            _DBG_URL,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        urllib.request.urlopen(req, timeout=1.5).read()
+    except Exception:
+        pass
+
+def _dbg_snapshot(tag):
+    snap = {"tag": tag, "torch": getattr(torch, "__version__", None), "cuda": bool(torch.cuda.is_available())}
+    if torch.cuda.is_available():
+        try:
+            snap["gpu_name"] = torch.cuda.get_device_name(0)
+            free, total = torch.cuda.mem_get_info(0)
+            snap["gpu_free_mb"] = int(free // (1024 * 1024))
+            snap["gpu_total_mb"] = int(total // (1024 * 1024))
+            snap["gpu_alloc_mb"] = int(torch.cuda.memory_allocated(0) // (1024 * 1024))
+            snap["gpu_reserved_mb"] = int(torch.cuda.memory_reserved(0) // (1024 * 1024))
+        except Exception:
+            pass
+    _dbg_send("A", "snapshot", snap)
+
+def _dbg_excepthook(exctype, value, tb):
+    _dbg_send("D", "uncaught-exception", {"type": str(exctype), "value": str(value), "traceback": "".join(traceback.format_tb(tb))})
+    return sys.__excepthook__(exctype, value, tb)
+
+sys.excepthook = _dbg_excepthook
+
+try:
+    os.makedirs(".dbg", exist_ok=True)
+    _fh_path = os.path.join(".dbg", "eval-llama-exit.faulthandler.log")
+    faulthandler.enable(open(_fh_path, "a", encoding="utf-8"))
+except Exception:
+    pass
+
+@atexit.register
+def _dbg_on_exit():
+    _dbg_send("A", "process-exit", {"exit": "atexit"})
+
+_dbg_snapshot("imported")
+# #endregion
 
 class _CentroidTracker(torch.nn.Module):
     def __init__(self, dim):
@@ -739,7 +815,15 @@ def main():
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # #region debug-point B:before-llm-load
+    _dbg_snapshot("before-llm-load")
+    _dbg_send("B", "llm-load-start", {"llm_name": str(args.llm_name), "device": str(device)})
+    # #endregion
     llm, target_dim = load_frozen_llm(args.llm_name)
+    # #region debug-point C:after-llm-load
+    _dbg_snapshot("after-llm-load")
+    _dbg_send("C", "llm-load-done", {"target_dim": int(target_dim) if target_dim is not None else None})
+    # #endregion
 
     state = None
     if os.path.exists(args.checkpoint):

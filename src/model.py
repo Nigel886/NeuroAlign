@@ -2,6 +2,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
+import os
+import json
+import time
+import urllib.request
 from transformers import AutoModelForCausalLM, BitsAndBytesConfig
 from src.models.subject_graph import SubjectGraphBase
 
@@ -141,24 +145,109 @@ class EEGTransformerEncoder(nn.Module):
             self.centering.set_delta(delta)
 
 def load_frozen_llm(model_name="meta-llama/Meta-Llama-3-8B-Instruct"):
-    """
-    加载冻结的 LLM (Llama-3)，使用 4-bit 量化以优化显存
-    """
-    bnb_config = BitsAndBytesConfig(
-        load_in_4bit=True,
-        bnb_4bit_use_double_quant=True,
-        bnb_4bit_quant_type="nf4",
-        bnb_4bit_compute_dtype=torch.bfloat16
-    )
-    
-    print(f"Loading LLM: {model_name} in 4-bit...")
-    llm = AutoModelForCausalLM.from_pretrained(
-        model_name,
-        quantization_config=bnb_config,
-        device_map="auto",
-        low_cpu_mem_usage=True,
-        trust_remote_code=True
-    )
+    # #region debug-point A:model-load-bootstrap
+    _dbg_env = os.path.join(os.getcwd(), ".dbg", "eval-llama-exit.env")
+    _dbg_url = "http://127.0.0.1:7777/event"
+    _dbg_session = "eval-llama-exit"
+    try:
+        with open(_dbg_env, "r", encoding="utf-8") as _f:
+            for _l in _f.read().splitlines():
+                if _l.startswith("DEBUG_SERVER_URL="):
+                    _dbg_url = _l.split("=", 1)[1].strip() or _dbg_url
+                elif _l.startswith("DEBUG_SESSION_ID="):
+                    _dbg_session = _l.split("=", 1)[1].strip() or _dbg_session
+    except Exception:
+        pass
+    def _dbg_send(hypothesis_id, msg, data=None, run_id="pre"):
+        payload = {
+            "sessionId": _dbg_session,
+            "runId": run_id,
+            "hypothesisId": str(hypothesis_id),
+            "location": "src/model.py:load_frozen_llm",
+            "msg": f"[DEBUG] {msg}",
+            "data": data or {},
+            "ts": int(time.time() * 1000),
+        }
+        try:
+            req = urllib.request.Request(
+                _dbg_url,
+                data=json.dumps(payload).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            urllib.request.urlopen(req, timeout=1.5).read()
+        except Exception:
+            pass
+    def _dbg_gpu(tag):
+        snap = {"tag": tag, "cuda": bool(torch.cuda.is_available())}
+        if torch.cuda.is_available():
+            try:
+                free, total = torch.cuda.mem_get_info(0)
+                snap["gpu_free_mb"] = int(free // (1024 * 1024))
+                snap["gpu_total_mb"] = int(total // (1024 * 1024))
+                snap["gpu_alloc_mb"] = int(torch.cuda.memory_allocated(0) // (1024 * 1024))
+                snap["gpu_reserved_mb"] = int(torch.cuda.memory_reserved(0) // (1024 * 1024))
+            except Exception:
+                pass
+        _dbg_send("B", "gpu-snapshot", snap)
+    _dbg_send("B", "enter-load-frozen-llm", {"model_name": str(model_name), "torch": getattr(torch, "__version__", None)})
+    _dbg_gpu("enter")
+    # #endregion
+    model_name_upper = str(model_name).upper()
+    is_llama_8b = ("LLAMA" in model_name_upper) and ("8B" in model_name_upper)
+    if torch.cuda.is_available():
+        free_mb = None
+        total_mb = None
+        try:
+            free, total = torch.cuda.mem_get_info(0)
+            free_mb = int(free // (1024 * 1024))
+            total_mb = int(total // (1024 * 1024))
+        except Exception:
+            pass
+
+        # if is_llama_8b and total_mb is not None and total_mb <= 9000:
+        #     msg = (
+        #         f"Refusing to load {model_name} on a {total_mb} MiB GPU. "
+        #         "Runtime evidence from this project shows that Llama-3 8B exits during from_pretrained() "
+        #         "on 8GB-class Windows/WDDM GPUs before Python can surface a traceback. "
+        #         "Use a smaller LLM (for example gpt2 or a 1B-class model), or run on a higher-VRAM GPU."
+        #     )
+        #     _dbg_send("D", "guard-raise", {"reason": "llama-8b-on-8gb-gpu", "total_mb": total_mb, "free_mb": free_mb, "model_name": str(model_name)})
+        #     raise RuntimeError(msg)
+
+        bnb_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_compute_dtype=torch.float16,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_use_double_quant=True,
+        )
+        print(f"Loading LLM: {model_name} in 4-bit...")
+        _dbg_send("B", "from_pretrained-4bit-auto", {"device_map": "auto", "free_mb": free_mb, "total_mb": total_mb})
+        llm = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            quantization_config=bnb_config,
+            device_map="balanced",
+            low_cpu_mem_usage=True,
+            trust_remote_code=True,
+        )
+        _dbg_gpu("after-load")
+    else:
+        if is_llama_8b:
+            msg = (
+                f"Refusing to load {model_name} on CPU. "
+                "The 8B model is too large for this project's eval/training flow without a stable CUDA path, "
+                "and previous runs were terminated during loading. Use a CUDA-capable environment or a smaller LLM."
+            )
+            _dbg_send("D", "guard-raise", {"reason": "llama-8b-on-cpu", "model_name": str(model_name)})
+            raise RuntimeError(msg)
+        print(f"Loading LLM: {model_name} on CPU (no 4-bit)...")
+        llm = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            device_map=None,
+            low_cpu_mem_usage=True,
+            trust_remote_code=True,
+        )
+        llm.to(torch.device("cpu"))
     
     # 彻底冻结权重
     for param in llm.parameters():
