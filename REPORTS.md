@@ -1,6 +1,6 @@
-# NeuroAlign: Technical Development & Evolution Log
+# GraphAlign: Technical Development & Evolution Log
 
-This document tracks the iterative development of the NeuroAlign framework, focusing on the alignment between EEG signals and LLM semantic embeddings.
+This document tracks the iterative development of the GraphAlign framework, focusing on the alignment between EEG signals and LLM semantic embeddings.
 
 ---
 
@@ -253,7 +253,7 @@ This document tracks the iterative development of the NeuroAlign framework, focu
 
 ### 🔍 Unified Technical Diagnosis & Paradigm Discovery:
 1. **Emergent Optimization on Source Domain:** The ascent of Seen Top-1 to $9.31\%$ on the ZPH base model under SGA is a monumental academic highlight. By introducing the **Elastic Parameter Loss ($L_{\text{elastic}}$)** alongside the **Semantic Gravity Anchor ($L_{\text{anchor}}$)**, the optimization path forces the LayerNorm updates to operate within an extremely constricted, high-fidelity boundary. Under ZPH's severe OOD pressure, this constraint acts as an implicit denoising autoencoder for the shared channels, filtering out intra-subject noise and projecting the Seen domains onto an ultra-sharp semantic manifold.
-2. **The Asymmetric Taxonomy Confirmed:** The overarching conclusion of the NeuroAlign project is now mathematically ironclad. Subject heterogeneities follow a dual-phase classification: ZAB represents a *Local Manifold Deformation* which SGA successfully unravels ($0.13\%$ breakout); whereas ZPH represents a *Global Subspace Disconnection* where the initial encoder support lacks mutual information with the target language grid, establishing the definitive boundaries of target-blind test-time adaptation.
+2. **The Asymmetric Taxonomy Confirmed:** The overarching conclusion of the GraphAlign project is now mathematically ironclad. Subject heterogeneities follow a dual-phase classification: ZAB represents a *Local Manifold Deformation* which SGA successfully unravels ($0.13\%$ breakout); whereas ZPH represents a *Global Subspace Disconnection* where the initial encoder support lacks mutual information with the target language grid, establishing the definitive boundaries of target-blind test-time adaptation.
 
 ---
 
@@ -706,7 +706,7 @@ This document tracks the iterative development of the NeuroAlign framework, focu
 
 ---
 
-## [v1.6] 2026-05-03 - Project NeuroAlign: LOSO & Adversarial Bottleneck
+## [v1.6] 2026-05-03 - Project GraphAlign: LOSO & Adversarial Bottleneck
 
 **Objective:** Implement Leave-One-Subject-Out (LOSO) training and evaluate cross-subject generalization using Subject-Adversarial (DANN) logic.
 

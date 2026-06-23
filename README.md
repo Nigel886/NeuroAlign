@@ -1,10 +1,10 @@
-# NeuroAlign
+# GraphAlign
 
 ## English
 
 ### Abstract
 
-NeuroAlign studies a difficult but practically important problem: how to align continuous-reading EEG signals with the semantic space of a frozen large language model under strong cross-subject distribution shift. The project is built on the ZuCo dataset and uses a Transformer-based EEG encoder trained against frozen LLM text representations. The research emphasis is not only on in-domain alignment, but on whether a model trained on seen subjects can preserve semantic structure when evaluated on an unseen subject in a strict LOSO setting.
+GraphAlign studies a difficult but practically important problem: how to align continuous-reading EEG signals with the semantic space of a frozen large language model under strong cross-subject distribution shift. The project is built on the ZuCo dataset and uses a Transformer-based EEG encoder trained against frozen LLM text representations. The research emphasis is not only on in-domain alignment, but on whether a model trained on seen subjects can preserve semantic structure when evaluated on an unseen subject in a strict LOSO setting.
 
 Across versions, the project evolves from a clean CLIP-style contrastive baseline into a family of test-time adaptation and representation-learning methods. The core line of inquiry is whether unseen-subject failure is caused by optimization weakness at inference time or by representational deprivation in the encoder itself. The current evidence recorded in [REPORTS.md](REPORTS.md) suggests a strong answer: test-time adaptation can refine existing semantic cues, but cannot recover semantic structure that the frozen base encoder never emits; topology-aware graph fusion is therefore introduced as a base-level remedy.
 
@@ -19,7 +19,7 @@ Two recurring phenomena motivate this repository:
 
 ### Method Overview
 
-NeuroAlign is organized around three interacting components:
+GraphAlign is organized around three interacting components:
 
 1. **Base EEG-to-LLM alignment**
    - `EEGTransformerEncoder` maps EEG into the semantic space of a frozen LLM.
@@ -161,7 +161,7 @@ python eval.py --checkpoint "checkpoints/v3_0_tta_ZPH/eeg_encoder_v3_0_tta_ZPH_l
 
 ### 摘要
 
-NeuroAlign 关注一个很难但很有现实意义的问题：在强跨受试分布偏移下，如何把连续阅读任务中的 EEG 信号对齐到冻结大语言模型的语义空间。项目基于 ZuCo 数据集，使用 Transformer 风格的 EEG 编码器去逼近冻结 LLM 的文本表征。研究重点不仅是域内对齐是否成立，更在于严格 LOSO 设置下，模型在未见受试者上是否还能保持可检索的语义结构。
+GraphAlign 关注一个很难但很有现实意义的问题：在强跨受试分布偏移下，如何把连续阅读任务中的 EEG 信号对齐到冻结大语言模型的语义空间。项目基于 ZuCo 数据集，使用 Transformer 风格的 EEG 编码器去逼近冻结 LLM 的文本表征。研究重点不仅是域内对齐是否成立，更在于严格 LOSO 设置下，模型在未见受试者上是否还能保持可检索的语义结构。
 
 整个项目沿着“干净基线 -> 测试时自适应 -> 基座结构升级”的路线持续推进。训练端从一个相对纯净的 CLIP-style 对比学习基线出发，推理端逐步引入多类 TTA 机制；与此同时，我们不断追问一个更根本的问题：未见受试者失败究竟是因为推理时优化不够强，还是因为编码器本身没有产生可救回的语义线索。当前 [REPORTS.md](REPORTS.md) 中的证据更倾向于后者：测试时自适应只能修整已有语义，不能凭空制造编码器没有发射出来的语义 token，因此需要引入图拓扑等“基座级”结构补救。
 
@@ -176,7 +176,7 @@ NeuroAlign 关注一个很难但很有现实意义的问题：在强跨受试分
 
 ### 方法概览
 
-NeuroAlign 目前可以理解为三个相互作用的模块：
+GraphAlign 目前可以理解为三个相互作用的模块：
 
 1. **EEG 到 LLM 的基础对齐**
    - `EEGTransformerEncoder` 负责把 EEG 表征映射到冻结 LLM 的语义空间。
