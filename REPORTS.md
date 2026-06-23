@@ -4,6 +4,24 @@ This document tracks the iterative development of the NeuroAlign framework, focu
 
 ---
 
+## [v8.0_graph] 2026-05-24 - Project Phantom: Subject Interaction Graph Base & Topology-Gated Fusion (Semantic Bridge Transfer)
+
+**Objective:** Introduce a Subject Interaction Graph (SIG) backbone inside the EEG Encoder by registering per-subject embeddings and performing batch-wise topology inference. After Transformer encoding, fuse each subject's EEG representation with graph-aggregated seen-domain topology prototypes via a gated residual bridge, aiming to inject global multi-subject clustering priors into sovereign OOD domains (e.g., ZPH) without breaking the contrastive training protocol.
+
+### 📊 Evaluation Track 2: loso_ZPH (Sovereign Outlier Domain)
+
+| Algorithmic Paradigm | Seen Top-1 | Seen Top-5 | Unseen Top-1 | Unseen Top-5 | Source Safety Status |
+| :--- | :---: | :---: | :---: | :---: | :--- |
+| v3.0 Inductive Base (Vanilla) | 9.05% | 43.75% | 0.00% | 0.00% | 🔒 Baseline Reference |
+| v6.1 Multi-Head MHLR ($\text{Rank=}16$) | **18.23%** | **85.53%** | 0.00% | 0.25% | 👑 Peak Source Dominance |
+| **v8.0 Graph-Base + v6.1 MHLR ($\text{Rank=}16$, Ours)** | **18.16%** | **84.13%** | **7.63%** | **80.15%** | 🌉 **Topology Bridge Breakthrough** |
+
+### 🔍 Unified Technical Diagnosis for Top-Journal Presentation:
+1. **Topology Anchoring Breaks the Orthogonal Barrier (拓扑锚定打破正交断层):** The SIG backbone converts the latent "subject identity" from an implicit nuisance factor into an explicit topological coordinate system. ZPH, previously locked at $0.00\%$ unseen under multiple OT / TMC / routing interventions, exhibits a massive jump to **Unseen Top-5: $80.15\%$**, indicating the base encoder now emits text-neighborhood tokens instead of a semantically empty orthogonal subspace.
+2. **Source Manifold Safety Preserved Under Graph Fusion (源域安全性在图融合下保持):** Seen metrics remain near the historical frontier (**Seen Top-5: $84.13\%$ vs $85.53\%$**), implying the gated graph residual acts as a controlled bridge rather than a destabilizing domain mixer. This supports the hypothesis that "representation deprivation" (not test-time optimization) was the hard boundary on ZPH, and that topology-gated fusion is a viable way to manufacture missing semantic cues at the encoder level while staying fully compatible with CLIP-style InfoNCE training.
+
+---
+
 ## [v7.1_meta_eval] 2026-05-24 - Project Phantom: Second-Order Meta-Base Evaluation & Asymmetric Manifold Differentiation (The Resolution Balance)
 
 **Objective:** Deploy the fine-grained MAML meta-base ($lr=2\text{e-}5$, $inner\_lr=5\text{e-}5$) onto the test-time adaptation platform (`v6.1_mhlr`, $\text{Rank=}16$) to verify the cross-domain thawing capabilities and evaluate the structural tension between source representation stability and OOD adaptation elasticity.
