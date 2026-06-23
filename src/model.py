@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 from transformers import AutoModelForCausalLM, BitsAndBytesConfig
+from src.models.subject_graph import SubjectGraphBase
 
 class PositionalEncoding(nn.Module):
     def __init__(self, d_model, dropout=0.1, max_len=5000):
@@ -58,6 +59,9 @@ class EEGTransformerEncoder(nn.Module):
         dropout=0.1,
         output_dim=4096,
         enable_centering=True,
+        use_graph_base=False,
+        num_subjects=None,
+        graph_hid_dim=256,
     ):
         super(EEGTransformerEncoder, self).__init__()
         
@@ -80,6 +84,11 @@ class EEGTransformerEncoder(nn.Module):
         # 4. Projection to LLM space
         self.proj_semantic = nn.Linear(d_model, output_dim)
         self.centering = CenteringLayer(output_dim) if enable_centering else None
+        self.graph_base = None
+        if bool(use_graph_base):
+            if num_subjects is None:
+                raise ValueError("num_subjects is required when use_graph_base=True")
+            self.graph_base = SubjectGraphBase(num_subjects=int(num_subjects), embed_dim=int(output_dim), hid_dim=int(graph_hid_dim))
         
         self.d_model = d_model
         self._init_weights()
@@ -94,6 +103,7 @@ class EEGTransformerEncoder(nn.Module):
         src,
         src_key_padding_mask=None,
         centering_delta=None,
+        subject_labels=None,
     ):
         """
         src: (batch_size, seq_len, input_dim)
@@ -120,6 +130,8 @@ class EEGTransformerEncoder(nn.Module):
         z_semantic = self.proj_semantic(pooled_output)
         if self.centering is not None:
             z_semantic = self.centering(z_semantic, delta=centering_delta)
+        if self.graph_base is not None:
+            z_semantic = self.graph_base(z_semantic, subject_labels=subject_labels)
         z_semantic = F.normalize(z_semantic, p=2, dim=-1)
         return z_semantic
 

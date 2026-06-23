@@ -194,6 +194,9 @@ def train_one_epoch(
         attention_mask = batch['attention_mask'].to(device)
         eeg = batch['eeg'].to(device)
         eeg_mask = batch['eeg_mask'].to(device) # (batch, seq_len)
+        subject_labels = batch.get("subject_labels", None)
+        if subject_labels is not None:
+            subject_labels = subject_labels.to(device)
         
         # 转换为 Transformer 需要的 bool mask (True 为 padding)
         src_key_padding_mask = (eeg_mask == 0)
@@ -211,7 +214,7 @@ def train_one_epoch(
         
         # 2. 混合精度前向传播
         with autocast():
-            z_semantic = model(eeg, src_key_padding_mask=src_key_padding_mask)
+            z_semantic = model(eeg, src_key_padding_mask=src_key_padding_mask, subject_labels=subject_labels)
             z_semantic = F.normalize(z_semantic.to(dtype=torch.float32), p=2, dim=-1).to(dtype=z_semantic.dtype)
             text_features = F.normalize(text_features.to(dtype=torch.float32), p=2, dim=-1).to(dtype=text_features.dtype)
             if getattr(model, "centroid_tracker", None) is None:

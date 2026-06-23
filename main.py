@@ -228,6 +228,12 @@ def main(args):
     llm, target_dim = load_frozen_llm(args.llm_name)
     
     # 4. 初始化 EEG Transformer 编码器
+    num_subjects = None
+    if getattr(args, "use_graph_base", False):
+        if hasattr(train_loader, "dataset") and hasattr(train_loader.dataset, "subject_to_idx"):
+            num_subjects = len(train_loader.dataset.subject_to_idx)
+        if not num_subjects:
+            raise ValueError("use_graph_base=True requires train_loader.dataset.subject_to_idx to infer num_subjects.")
     model = EEGTransformerEncoder(
         input_dim=105, 
         d_model=512, 
@@ -235,6 +241,9 @@ def main(args):
         num_layers=4, 
         output_dim=target_dim,
         enable_centering=args.use_centering,
+        use_graph_base=bool(getattr(args, "use_graph_base", False)),
+        num_subjects=num_subjects,
+        graph_hid_dim=int(getattr(args, "graph_hid_dim", 256)),
     ).to(device)
 
     if args.init_checkpoint is not None:
@@ -263,7 +272,7 @@ def main(args):
     print(f"\nStarting NeuroAlign Training for {args.epochs} epochs...")
     print(f"Gradient Accumulation Steps: {args.grad_accum}")
 
-    checkpoint_root = os.path.join("checkpoints", str(args.version_tag))
+    checkpoint_root = os.path.join("checkpoints", "v8_0_graph") if bool(getattr(args, "use_graph_base", False)) else os.path.join("checkpoints", str(args.version_tag))
     os.makedirs(checkpoint_root, exist_ok=True)
     print(f"Checkpoints will be saved to: {os.path.abspath(checkpoint_root)}")
     
@@ -406,6 +415,12 @@ if __name__ == "__main__":
     parser.add_argument("--inner_lr", type=float, default=1e-4)
     parser.add_argument("--inner_lambda_proto", type=float, default=1.0)
     parser.add_argument("--tta_rank", type=int, default=16)
+    def _str2bool(v):
+        if isinstance(v, bool):
+            return v
+        return str(v).strip().lower() in {"1", "true", "yes", "y", "t"}
+    parser.add_argument("--use_graph_base", type=_str2bool, default=False)
+    parser.add_argument("--graph_hid_dim", type=int, default=256)
     
     args = parser.parse_args()
     

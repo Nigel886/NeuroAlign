@@ -120,7 +120,7 @@ class ZuCoDataset(Dataset):
         else:
             self.data = [it for it in raw_items if it["subject_id"] == test_subject]
 
-        subjects = sorted({str(it["subject_id"]).upper() for it in self.data if it.get("subject_id") not in (None, "UNK")})
+        subjects = sorted({str(it["subject_id"]).upper() for it in raw_items if it.get("subject_id") not in (None, "UNK")})
         self.subject_to_idx = {sid: i for i, sid in enumerate(subjects)}
 
         self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name_or_path)

@@ -1,0 +1,21 @@
+{
+  "checkpoint": "C:\\Users\\Nigel Yan\\Desktop\\Personal\\NeuroAlign\\checkpoints\\v8_0_graph\\eeg_encoder_epoch_best.pth",
+  "checkpoint_version": null,
+  "data_path": "C:\\Users\\Nigel Yan\\Desktop\\Personal\\NeuroAlign\\data\\preprocessed\\processed_zuco_cleaned.pt",
+  "llm_name": "meta-llama/Meta-Llama-3-8B-Instruct",
+  "tokenizer_name": "meta-llama/Meta-Llama-3-8B-Instruct",
+  "batch_size": 4,
+  "test_subject_id": "ZPH",
+  "metrics": {
+    "num_samples": 1962,
+    "top1_all": 0.16055046021938324,
+    "top5_all": 0.8333333134651184,
+    "top1_unseen": 0.07633587718009949,
+    "top5_unseen": 0.8015267252922058,
+    "unseen_subject_id": "ZPH",
+    "num_unseen": 393,
+    "top1_seen": 0.18164436519145966,
+    "top5_seen": 0.8413001894950867,
+    "num_seen": 1569
+  }
+}
